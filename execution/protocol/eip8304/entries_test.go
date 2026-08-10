@@ -39,7 +39,8 @@ func TestLogEntryEncodingUsesReceiptLocalLogIndex(t *testing.T) {
 		addressEntry.Encode().String(),
 	)
 
-	for topicPosition := uint8(0); topicPosition < 4; topicPosition++ {
+	for topicIndex := range 4 {
+		topicPosition := uint8(topicIndex)
 		topicEntry, err := NewLogTopicEntry(
 			42,
 			1,
@@ -75,4 +76,13 @@ func TestEntriesSortByEncodedBytes(t *testing.T) {
 	require.Equal(t, "0x42f66a2e9f9c68e223e8d826145d7cfacb00520dba6a9555803121de29790b65", entries[0].Value.String())
 	require.Equal(t, EntryBlock, entries[1].Type)
 	require.Equal(t, EntryLogAddress, entries[2].Type)
+}
+
+func TestEncodedEntryLeafHashUsesSHA256(t *testing.T) {
+	entry := NewBlockEntry(40, common.HexToHash("0x42f66a2e9f9c68e223e8d826145d7cfacb00520dba6a9555803121de29790b65"))
+
+	require.Equal(t,
+		"0xef9f34bd4316ac2801d63afd42a6e967a928dfe53194cde890a2beb5bba31f05",
+		entry.Encode().LeafHash().String(),
+	)
 }

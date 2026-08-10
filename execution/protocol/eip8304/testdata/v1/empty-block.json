@@ -1,0 +1,25 @@
+{
+  "schema": "eip-8304-fixture",
+  "schema_version": 1,
+  "status": "draft-pre-root",
+  "eip_revision": "81b976ac01591fed2eecb73fa574f27cd18db2e8",
+  "name": "empty-block-with-parent-entry",
+  "input": {
+    "block_number": "0x2a",
+    "parent_block_hash": "0x42f66a2e9f9c68e223e8d826145d7cfacb00520dba6a9555803121de29790b65",
+    "transactions": [],
+    "receipts": []
+  },
+  "expected": {
+    "encoded_entries_chronological": [
+      "0x000042f66a2e9f9c68e223e8d826145d7cfacb00520dba6a9555803121de29790b650000000000000029"
+    ],
+    "encoded_entries_sorted": [
+      "0x000042f66a2e9f9c68e223e8d826145d7cfacb00520dba6a9555803121de29790b650000000000000029"
+    ],
+    "leaf_hashes_sorted": [
+      "0xa0bc02ddec6c19f8fc45d969dfa0a398d72dc4e2493e2d7ce6595e990a40d1e7"
+    ],
+    "entry_count": "0x1"
+  }
+}

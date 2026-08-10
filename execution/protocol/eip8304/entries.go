@@ -2,6 +2,7 @@ package eip8304
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -40,6 +41,10 @@ type EncodedEntry []byte
 
 func (e EncodedEntry) String() string {
 	return hex.EncodeToString(e)
+}
+
+func (e EncodedEntry) LeafHash() common.Hash {
+	return sha256.Sum256(e)
 }
 
 func NewBlockEntry(block uint64, blockHash common.Hash) Entry {

@@ -1,0 +1,31 @@
+{
+  "schema": "eip-8304-fixture",
+  "schema_version": 1,
+  "status": "draft-pre-root",
+  "eip_revision": "81b976ac01591fed2eecb73fa574f27cd18db2e8",
+  "name": "reject-more-than-four-log-topics",
+  "input": {
+    "block_number": "0x2a",
+    "parent_block_hash": "0x42f66a2e9f9c68e223e8d826145d7cfacb00520dba6a9555803121de29790b65",
+    "transactions": [
+      { "hash": "0x1111111111111111111111111111111111111111111111111111111111111111" }
+    ],
+    "receipts": [
+      {
+        "logs": [
+          {
+            "address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "topics": [
+              "0x0101010101010101010101010101010101010101010101010101010101010101",
+              "0x0202020202020202020202020202020202020202020202020202020202020202",
+              "0x0303030303030303030303030303030303030303030303030303030303030303",
+              "0x0404040404040404040404040404040404040404040404040404040404040404",
+              "0x0505050505050505050505050505050505050505050505050505050505050505"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "expected_error": "too_many_log_topics"
+}

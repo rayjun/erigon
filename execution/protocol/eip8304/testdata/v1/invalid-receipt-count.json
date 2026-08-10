@@ -1,0 +1,16 @@
+{
+  "schema": "eip-8304-fixture",
+  "schema_version": 1,
+  "status": "draft-pre-root",
+  "eip_revision": "81b976ac01591fed2eecb73fa574f27cd18db2e8",
+  "name": "reject-transaction-receipt-count-mismatch",
+  "input": {
+    "block_number": "0x2a",
+    "parent_block_hash": "0x42f66a2e9f9c68e223e8d826145d7cfacb00520dba6a9555803121de29790b65",
+    "transactions": [
+      { "hash": "0x1111111111111111111111111111111111111111111111111111111111111111" }
+    ],
+    "receipts": []
+  },
+  "expected_error": "transaction_receipt_count_mismatch"
+}

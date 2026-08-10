@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EIP-8304 fixture",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "status", "eip_revision", "name", "input"],
+  "properties": {
+    "schema": { "const": "eip-8304-fixture" },
+    "schema_version": { "const": 1 },
+    "status": { "const": "draft-pre-root" },
+    "eip_revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "name": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+    "input": { "$ref": "#/$defs/input" },
+    "expected": { "$ref": "#/$defs/output" },
+    "expected_error": { "$ref": "#/$defs/errorCode" }
+  },
+  "oneOf": [
+    { "required": ["expected"], "not": { "required": ["expected_error"] } },
+    { "required": ["expected_error"], "not": { "required": ["expected"] } }
+  ],
+  "$defs": {
+    "quantity": {
+      "type": "string",
+      "pattern": "^0x(?:0|[1-9a-f][0-9a-f]*)$"
+    },
+    "hash32": {
+      "type": "string",
+      "pattern": "^0x[0-9a-f]{64}$"
+    },
+    "address": {
+      "type": "string",
+      "pattern": "^0x[0-9a-f]{40}$"
+    },
+    "encodedEntry": {
+      "type": "string",
+      "pattern": "^0x(?:[0-9a-f]{76}|[0-9a-f]{84}|[0-9a-f]{100})$"
+    },
+    "log": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["address", "topics"],
+      "properties": {
+        "address": { "$ref": "#/$defs/address" },
+        "topics": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/hash32" }
+        }
+      }
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logs"],
+      "properties": {
+        "logs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/log" }
+        }
+      }
+    },
+    "transaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hash"],
+      "properties": {
+        "hash": { "$ref": "#/$defs/hash32" }
+      }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["block_number", "parent_block_hash", "transactions", "receipts"],
+      "properties": {
+        "block_number": { "$ref": "#/$defs/quantity" },
+        "parent_block_hash": { "$ref": "#/$defs/hash32" },
+        "transactions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/transaction" }
+        },
+        "receipts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/receipt" }
+        }
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["encoded_entries_chronological", "encoded_entries_sorted", "leaf_hashes_sorted", "entry_count"],
+      "properties": {
+        "encoded_entries_chronological": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/encodedEntry" }
+        },
+        "encoded_entries_sorted": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/encodedEntry" }
+        },
+        "leaf_hashes_sorted": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/hash32" }
+        },
+        "entry_count": { "$ref": "#/$defs/quantity" }
+      }
+    },
+    "errorCode": {
+      "enum": [
+        "invalid_block_number",
+        "invalid_parent_block",
+        "invalid_parent_block_hash",
+        "transaction_receipt_count_mismatch",
+        "too_many_transactions",
+        "invalid_transaction_hash",
+        "too_many_logs",
+        "too_many_log_topics",
+        "invalid_log_address",
+        "invalid_log_topic",
+        "invalid_log_topic_position"
+      ]
+    }
+  }
+}

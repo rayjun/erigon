@@ -1,0 +1,32 @@
+{
+  "schema": "eip-8304-fixture",
+  "schema_version": 1,
+  "status": "draft-pre-root",
+  "eip_revision": "81b976ac01591fed2eecb73fa574f27cd18db2e8",
+  "name": "single-transaction-without-logs",
+  "input": {
+    "block_number": "0x2a",
+    "parent_block_hash": "0x42f66a2e9f9c68e223e8d826145d7cfacb00520dba6a9555803121de29790b65",
+    "transactions": [
+      { "hash": "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
+    ],
+    "receipts": [
+      { "logs": [] }
+    ]
+  },
+  "expected": {
+    "encoded_entries_chronological": [
+      "0x000042f66a2e9f9c68e223e8d826145d7cfacb00520dba6a9555803121de29790b650000000000000029",
+      "0x00010123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef000000000000002a0000000000000000"
+    ],
+    "encoded_entries_sorted": [
+      "0x000042f66a2e9f9c68e223e8d826145d7cfacb00520dba6a9555803121de29790b650000000000000029",
+      "0x00010123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef000000000000002a0000000000000000"
+    ],
+    "leaf_hashes_sorted": [
+      "0xa0bc02ddec6c19f8fc45d969dfa0a398d72dc4e2493e2d7ce6595e990a40d1e7",
+      "0x153a4683a8ed9d0b74a9889f067db7c035b1efd6f4ddd4caee7a9a5dd92fdd87"
+    ],
+    "entry_count": "0x2"
+  }
+}

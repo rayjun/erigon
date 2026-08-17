@@ -2,6 +2,8 @@
 
 The `v1` vectors target EIP revision `81b976ac01591fed2eecb73fa574f27cd18db2e8` and the schema in `schema-v1.json`.
 
+The `schema-negative` corpus contains malformed quantities, hashes, and addresses. Every JSON file there must fail `schema-v1.json`; parser unit tests separately verify their diagnostic codes. Only schema-valid protocol errors belong in the `v1` `expected_error` enum.
+
 To update a vector:
 
 1. Change the smallest input that demonstrates one protocol rule.

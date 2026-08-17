@@ -6,7 +6,7 @@
   "name": "reject-more-than-four-log-topics",
   "input": {
     "block_number": "0x2a",
-    "parent_block_hash": "0x42f66a2e9f9c68e223e8d826145d7cfacb00520dba6a9555803121de29790b65",
+    "parent_block_hash": "0x978ce0036b6d1c62d716045505587d15cc85a1def92f9f450937b6467295e517",
     "transactions": [
       { "hash": "0x1111111111111111111111111111111111111111111111111111111111111111" }
     ],

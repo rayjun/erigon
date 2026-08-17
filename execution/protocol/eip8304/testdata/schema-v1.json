@@ -105,16 +105,10 @@
     },
     "errorCode": {
       "enum": [
-        "invalid_block_number",
-        "invalid_parent_block_hash",
         "transaction_receipt_count_mismatch",
         "too_many_transactions",
-        "invalid_transaction_hash",
         "too_many_logs",
-        "too_many_log_topics",
-        "invalid_log_address",
-        "invalid_log_topic",
-        "invalid_log_topic_position"
+        "too_many_log_topics"
       ]
     }
   }

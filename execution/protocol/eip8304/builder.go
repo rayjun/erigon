@@ -19,6 +19,7 @@ var (
 	ErrTooManyLogTopics     = errors.New("too many log topics")
 )
 
+// BuildBlockEntries returns entries in block execution order; callers must sort them before table hashing.
 func BuildBlockEntries(
 	block uint64,
 	parentBlockHash common.Hash,

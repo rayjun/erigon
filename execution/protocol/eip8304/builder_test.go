@@ -53,6 +53,45 @@ func TestBuildBlockEntriesGenesisHasNoParentEntry(t *testing.T) {
 	require.Empty(t, entries)
 }
 
+func TestBuildBlockEntriesGenesisIncludesTransactionAndLogs(t *testing.T) {
+	transaction := types.NewTransaction(0, common.Address{}, uint256.NewInt(0), 21_000, uint256.NewInt(1), nil)
+	receipts := types.Receipts{{Logs: types.Logs{{
+		Address: common.HexToAddress("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+		Topics:  []common.Hash{{1}},
+	}}}}
+
+	entries, err := BuildBlockEntries(0, common.HexToHash("0x01"), types.Transactions{transaction}, receipts)
+
+	require.NoError(t, err)
+	require.Len(t, entries, 3)
+	require.Equal(t, EntryTransaction, entries[0].Type)
+	require.Equal(t, EntryLogAddress, entries[1].Type)
+	require.Equal(t, EntryLogTopic0, entries[2].Type)
+	for _, entry := range entries {
+		require.Equal(t, uint64(0), entry.block)
+	}
+}
+
+func TestBuildBlockEntriesMatchesHashBasedFixturePath(t *testing.T) {
+	transactions := types.Transactions{
+		types.NewTransaction(0, common.Address{}, uint256.NewInt(0), 21_000, uint256.NewInt(1), nil),
+		types.NewTransaction(1, common.Address{}, uint256.NewInt(0), 21_000, uint256.NewInt(1), nil),
+	}
+	receipts := types.Receipts{
+		{Logs: types.Logs{{Address: common.HexToAddress("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")}}},
+		{},
+	}
+	transactionHashes := []common.Hash{transactions[0].Hash(), transactions[1].Hash()}
+	parentBlockHash := common.HexToHash("0x978ce0036b6d1c62d716045505587d15cc85a1def92f9f450937b6467295e517")
+
+	publicEntries, err := BuildBlockEntries(42, parentBlockHash, transactions, receipts)
+	require.NoError(t, err)
+	fixtureEntries, err := buildBlockEntriesFromHashes(42, parentBlockHash, transactionHashes, receipts)
+	require.NoError(t, err)
+
+	require.Equal(t, fixtureEntries, publicEntries)
+}
+
 func TestBuildBlockEntriesRejectsInvalidInputs(t *testing.T) {
 	transaction := types.NewTransaction(0, common.Address{}, uint256.NewInt(0), 21_000, uint256.NewInt(1), nil)
 	fiveTopics := []common.Hash{{1}, {2}, {3}, {4}, {5}}

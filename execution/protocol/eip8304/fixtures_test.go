@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -165,10 +166,6 @@ func calculateFixture(input fixtureInput) (fixtureOutput, string) {
 			return fixtureOutput{}, "too_many_logs"
 		case errors.Is(err, ErrTooManyLogTopics):
 			return fixtureOutput{}, "too_many_log_topics"
-		case errors.Is(err, ErrNilReceipt):
-			return fixtureOutput{}, "nil_receipt"
-		case errors.Is(err, ErrNilLog):
-			return fixtureOutput{}, "nil_log"
 		default:
 			return fixtureOutput{}, "unexpected_builder_error"
 		}
@@ -188,6 +185,64 @@ func calculateFixture(input fixtureInput) (fixtureOutput, string) {
 		LeafHashesSorted:            leaves,
 		EntryCount:                  fmt.Sprintf("0x%x", len(entries)),
 	}, ""
+}
+
+func TestCalculateFixtureRejectsMalformedFields(t *testing.T) {
+	validHash := "0x" + strings.Repeat("00", hashLength)
+	validAddress := "0x" + strings.Repeat("00", addressLength)
+	tests := []struct {
+		name  string
+		input fixtureInput
+		want  string
+	}{
+		{
+			name: "block number",
+			input: fixtureInput{
+				BlockNumber: "42", ParentBlockHash: validHash,
+			},
+			want: "invalid_block_number",
+		},
+		{
+			name: "parent block hash",
+			input: fixtureInput{
+				BlockNumber: "0x2a", ParentBlockHash: "0x01",
+			},
+			want: "invalid_parent_block_hash",
+		},
+		{
+			name: "transaction hash",
+			input: fixtureInput{
+				BlockNumber: "0x2a", ParentBlockHash: validHash,
+				Transactions: []fixtureTransaction{{Hash: "0x01"}}, Receipts: []fixtureReceipt{{}},
+			},
+			want: "invalid_transaction_hash",
+		},
+		{
+			name: "log address",
+			input: fixtureInput{
+				BlockNumber: "0x2a", ParentBlockHash: validHash,
+				Transactions: []fixtureTransaction{{Hash: validHash}},
+				Receipts:     []fixtureReceipt{{Logs: []fixtureLog{{Address: "0x01"}}}},
+			},
+			want: "invalid_log_address",
+		},
+		{
+			name: "log topic",
+			input: fixtureInput{
+				BlockNumber: "0x2a", ParentBlockHash: validHash,
+				Transactions: []fixtureTransaction{{Hash: validHash}},
+				Receipts:     []fixtureReceipt{{Logs: []fixtureLog{{Address: validAddress, Topics: []string{"0x01"}}}}},
+			},
+			want: "invalid_log_topic",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, errorCode := calculateFixture(test.input)
+			require.Equal(t, test.want, errorCode)
+		})
+	}
 }
 
 func encodeEntries(entries Entries) []string {

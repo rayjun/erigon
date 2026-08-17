@@ -106,7 +106,6 @@
     "errorCode": {
       "enum": [
         "invalid_block_number",
-        "invalid_parent_block",
         "invalid_parent_block_hash",
         "transaction_receipt_count_mismatch",
         "too_many_transactions",

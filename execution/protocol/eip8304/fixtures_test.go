@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/erigontech/erigon/common"
 	"github.com/erigontech/erigon/common/hexutil"
+	"github.com/erigontech/erigon/execution/types"
 )
 
 const (
@@ -120,55 +120,58 @@ func calculateFixture(input fixtureInput) (fixtureOutput, string) {
 	if err != nil {
 		return fixtureOutput{}, "invalid_block_number"
 	}
-	if block == 0 {
-		return fixtureOutput{}, "invalid_parent_block"
-	}
 	parentHash, err := decodeHash(input.ParentBlockHash)
 	if err != nil {
 		return fixtureOutput{}, "invalid_parent_block_hash"
 	}
-	if len(input.Transactions) != len(input.Receipts) {
-		return fixtureOutput{}, "transaction_receipt_count_mismatch"
-	}
-	if len(input.Transactions) > math.MaxUint32 {
-		return fixtureOutput{}, "too_many_transactions"
-	}
-
-	entries := Entries{NewBlockEntry(block-1, parentHash)}
-	var cumulativeLogCount uint32
+	transactionHashes := make([]common.Hash, len(input.Transactions))
 	for transactionIndex, transaction := range input.Transactions {
 		transactionHash, err := decodeHash(transaction.Hash)
 		if err != nil {
 			return fixtureOutput{}, "invalid_transaction_hash"
 		}
-		entries = append(entries, NewTransactionEntry(block, uint32(transactionIndex), cumulativeLogCount, transactionHash))
-
-		receipt := input.Receipts[transactionIndex]
-		if uint64(cumulativeLogCount)+uint64(len(receipt.Logs)) > math.MaxUint32 {
-			return fixtureOutput{}, "too_many_logs"
-		}
-		for logIndex, log := range receipt.Logs {
-			if len(log.Topics) > 4 {
-				return fixtureOutput{}, "too_many_log_topics"
-			}
-			address, err := decodeAddress(log.Address)
+		transactionHashes[transactionIndex] = transactionHash
+	}
+	receipts := make(types.Receipts, len(input.Receipts))
+	for receiptIndex, fixtureReceipt := range input.Receipts {
+		receipt := &types.Receipt{Logs: make(types.Logs, len(fixtureReceipt.Logs))}
+		for logIndex, fixtureLog := range fixtureReceipt.Logs {
+			log := &types.Log{Topics: make([]common.Hash, len(fixtureLog.Topics))}
+			address, err := decodeAddress(fixtureLog.Address)
 			if err != nil {
 				return fixtureOutput{}, "invalid_log_address"
 			}
-			entries = append(entries, NewLogAddressEntry(block, uint32(transactionIndex), uint32(logIndex), address))
-			for topicPosition, encodedTopic := range log.Topics {
+			log.Address = address
+			for topicPosition, encodedTopic := range fixtureLog.Topics {
 				topic, err := decodeHash(encodedTopic)
 				if err != nil {
 					return fixtureOutput{}, "invalid_log_topic"
 				}
-				entry, err := NewLogTopicEntry(block, uint32(transactionIndex), uint32(logIndex), uint8(topicPosition), topic)
-				if err != nil {
-					return fixtureOutput{}, "invalid_log_topic_position"
-				}
-				entries = append(entries, entry)
+				log.Topics[topicPosition] = topic
 			}
+			receipt.Logs[logIndex] = log
 		}
-		cumulativeLogCount += uint32(len(receipt.Logs))
+		receipts[receiptIndex] = receipt
+	}
+
+	entries, err := buildBlockEntriesFromHashes(block, parentHash, transactionHashes, receipts)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrReceiptCountMismatch):
+			return fixtureOutput{}, "transaction_receipt_count_mismatch"
+		case errors.Is(err, ErrTooManyTransactions):
+			return fixtureOutput{}, "too_many_transactions"
+		case errors.Is(err, ErrTooManyLogs):
+			return fixtureOutput{}, "too_many_logs"
+		case errors.Is(err, ErrTooManyLogTopics):
+			return fixtureOutput{}, "too_many_log_topics"
+		case errors.Is(err, ErrNilReceipt):
+			return fixtureOutput{}, "nil_receipt"
+		case errors.Is(err, ErrNilLog):
+			return fixtureOutput{}, "nil_log"
+		default:
+			return fixtureOutput{}, "unexpected_builder_error"
+		}
 	}
 
 	chronological := encodeEntries(entries)

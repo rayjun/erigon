@@ -1,0 +1,19 @@
+{
+  "schema": "eip-8304-fixture",
+  "schema_version": 1,
+  "status": "draft-pre-root",
+  "eip_revision": "81b976ac01591fed2eecb73fa574f27cd18db2e8",
+  "name": "genesis-block-without-parent-entry",
+  "input": {
+    "block_number": "0x0",
+    "parent_block_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "transactions": [],
+    "receipts": []
+  },
+  "expected": {
+    "encoded_entries_chronological": [],
+    "encoded_entries_sorted": [],
+    "leaf_hashes_sorted": [],
+    "entry_count": "0x0"
+  }
+}

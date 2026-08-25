@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EIP-8304 merge fixture",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "status", "eip_revision", "name", "blocks", "expected"],
+  "properties": {
+    "schema": { "const": "eip-8304-merge-fixture" },
+    "schema_version": { "const": 1 },
+    "status": { "const": "draft-pre-root" },
+    "eip_revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "name": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+    "blocks": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": { "$ref": "#/$defs/block" }
+    },
+    "expected": { "$ref": "#/$defs/output" }
+  },
+  "$defs": {
+    "quantity": {
+      "type": "string",
+      "pattern": "^0x(?:0|[1-9a-f][0-9a-f]*)$"
+    },
+    "hash32": {
+      "type": "string",
+      "pattern": "^0x[0-9a-f]{64}$"
+    },
+    "address": {
+      "type": "string",
+      "pattern": "^0x[0-9a-f]{40}$"
+    },
+    "encodedEntry": {
+      "type": "string",
+      "pattern": "^0x(?:[0-9a-f]{76}|[0-9a-f]{84}|[0-9a-f]{100})$"
+    },
+    "log": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["address", "topics"],
+      "properties": {
+        "address": { "$ref": "#/$defs/address" },
+        "topics": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/hash32" }
+        }
+      }
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logs"],
+      "properties": {
+        "logs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/log" }
+        }
+      }
+    },
+    "transaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hash"],
+      "properties": {
+        "hash": { "$ref": "#/$defs/hash32" }
+      }
+    },
+    "block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["block_number", "parent_block_hash", "transactions", "receipts"],
+      "properties": {
+        "block_number": { "$ref": "#/$defs/quantity" },
+        "parent_block_hash": { "$ref": "#/$defs/hash32" },
+        "transactions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/transaction" }
+        },
+        "receipts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/receipt" }
+        }
+      }
+    },
+    "l0Table": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["encoded_entries_sorted", "entry_count"],
+      "properties": {
+        "encoded_entries_sorted": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/encodedEntry" }
+        },
+        "entry_count": { "$ref": "#/$defs/quantity" }
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["per_block_l0", "merged_sorted", "merged_leaf_hashes", "merged_entry_count"],
+      "properties": {
+        "per_block_l0": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/l0Table" }
+        },
+        "merged_sorted": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/encodedEntry" }
+        },
+        "merged_leaf_hashes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/hash32" }
+        },
+        "merged_entry_count": { "$ref": "#/$defs/quantity" }
+      }
+    }
+  }
+}

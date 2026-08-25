@@ -117,58 +117,15 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 }
 
 func calculateFixture(input fixtureInput) (fixtureOutput, string) {
-	block, err := hexutil.DecodeUint64(input.BlockNumber)
-	if err != nil {
-		return fixtureOutput{}, "invalid_block_number"
-	}
-	parentHash, err := decodeHash(input.ParentBlockHash)
-	if err != nil {
-		return fixtureOutput{}, "invalid_parent_block_hash"
-	}
-	transactionHashes := make([]common.Hash, len(input.Transactions))
-	for transactionIndex, transaction := range input.Transactions {
-		transactionHash, err := decodeHash(transaction.Hash)
-		if err != nil {
-			return fixtureOutput{}, "invalid_transaction_hash"
-		}
-		transactionHashes[transactionIndex] = transactionHash
-	}
-	receipts := make(types.Receipts, len(input.Receipts))
-	for receiptIndex, fixtureReceipt := range input.Receipts {
-		receipt := &types.Receipt{Logs: make(types.Logs, len(fixtureReceipt.Logs))}
-		for logIndex, fixtureLog := range fixtureReceipt.Logs {
-			log := &types.Log{Topics: make([]common.Hash, len(fixtureLog.Topics))}
-			address, err := decodeAddress(fixtureLog.Address)
-			if err != nil {
-				return fixtureOutput{}, "invalid_log_address"
-			}
-			log.Address = address
-			for topicPosition, encodedTopic := range fixtureLog.Topics {
-				topic, err := decodeHash(encodedTopic)
-				if err != nil {
-					return fixtureOutput{}, "invalid_log_topic"
-				}
-				log.Topics[topicPosition] = topic
-			}
-			receipt.Logs[logIndex] = log
-		}
-		receipts[receiptIndex] = receipt
+	block, parentHash, transactionHashes, receipts, errorCode := decodeBlock(input)
+	if errorCode != "" {
+		return fixtureOutput{}, errorCode
 	}
 
 	entries, err := buildBlockEntriesFromHashes(block, parentHash, transactionHashes, receipts)
 	if err != nil {
-		switch {
-		case errors.Is(err, ErrReceiptCountMismatch):
-			return fixtureOutput{}, "transaction_receipt_count_mismatch"
-		case errors.Is(err, ErrTooManyTransactions):
-			return fixtureOutput{}, "too_many_transactions"
-		case errors.Is(err, ErrTooManyLogs):
-			return fixtureOutput{}, "too_many_logs"
-		case errors.Is(err, ErrTooManyLogTopics):
-			return fixtureOutput{}, "too_many_log_topics"
-		default:
-			return fixtureOutput{}, "unexpected_builder_error"
-		}
+		errorCode = mapBuilderError(err)
+		return fixtureOutput{}, errorCode
 	}
 
 	chronological := encodeEntries(entries)
@@ -185,6 +142,67 @@ func calculateFixture(input fixtureInput) (fixtureOutput, string) {
 		LeafHashesSorted:            leaves,
 		EntryCount:                  fmt.Sprintf("0x%x", len(entries)),
 	}, ""
+}
+
+// decodeBlock parses a single block fixture input into the raw consensus
+// inputs (block number, parent hash, transaction hashes, receipts) or returns
+// a stable error code for a malformed field.
+func decodeBlock(input fixtureInput) (uint64, common.Hash, []common.Hash, types.Receipts, string) {
+	block, err := hexutil.DecodeUint64(input.BlockNumber)
+	if err != nil {
+		return 0, common.Hash{}, nil, nil, "invalid_block_number"
+	}
+	parentHash, err := decodeHash(input.ParentBlockHash)
+	if err != nil {
+		return 0, common.Hash{}, nil, nil, "invalid_parent_block_hash"
+	}
+	transactionHashes := make([]common.Hash, len(input.Transactions))
+	for transactionIndex, transaction := range input.Transactions {
+		transactionHash, err := decodeHash(transaction.Hash)
+		if err != nil {
+			return 0, common.Hash{}, nil, nil, "invalid_transaction_hash"
+		}
+		transactionHashes[transactionIndex] = transactionHash
+	}
+	receipts := make(types.Receipts, len(input.Receipts))
+	for receiptIndex, fixtureReceipt := range input.Receipts {
+		receipt := &types.Receipt{Logs: make(types.Logs, len(fixtureReceipt.Logs))}
+		for logIndex, fixtureLog := range fixtureReceipt.Logs {
+			log := &types.Log{Topics: make([]common.Hash, len(fixtureLog.Topics))}
+			address, err := decodeAddress(fixtureLog.Address)
+			if err != nil {
+				return 0, common.Hash{}, nil, nil, "invalid_log_address"
+			}
+			log.Address = address
+			for topicPosition, encodedTopic := range fixtureLog.Topics {
+				topic, err := decodeHash(encodedTopic)
+				if err != nil {
+					return 0, common.Hash{}, nil, nil, "invalid_log_topic"
+				}
+				log.Topics[topicPosition] = topic
+			}
+			receipt.Logs[logIndex] = log
+		}
+		receipts[receiptIndex] = receipt
+	}
+	return block, parentHash, transactionHashes, receipts, ""
+}
+
+// mapBuilderError translates a production-builder sentinel error into a stable
+// cross-implementation error code.
+func mapBuilderError(err error) string {
+	switch {
+	case errors.Is(err, ErrReceiptCountMismatch):
+		return "transaction_receipt_count_mismatch"
+	case errors.Is(err, ErrTooManyTransactions):
+		return "too_many_transactions"
+	case errors.Is(err, ErrTooManyLogs):
+		return "too_many_logs"
+	case errors.Is(err, ErrTooManyLogTopics):
+		return "too_many_log_topics"
+	default:
+		return "unexpected_builder_error"
+	}
 }
 
 func TestCalculateFixtureRejectsMalformedFields(t *testing.T) {

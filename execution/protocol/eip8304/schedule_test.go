@@ -60,8 +60,29 @@ func TestMergeGroup(t *testing.T) {
 }
 
 func TestTableSizesAreGeometricWithRatioFour(t *testing.T) {
-	require.Equal(t, []uint64{1, 4, 16, 64, 256}, TableSizes)
+	require.Equal(t, [5]uint64{1, 4, 16, 64, 256}, TableSizes)
 	for i := 1; i < len(TableSizes); i++ {
 		require.Equal(t, TableSizes[i-1]*4, TableSizes[i])
 	}
+}
+
+// TestDueTablesRoundTrip checks the schedule invariant: the table written at
+// WriteBlock(fb, size) is exactly the one DueTables reports at that block.
+func TestDueTablesRoundTrip(t *testing.T) {
+	for _, size := range TableSizes {
+		for fb := uint64(0); fb < 4096; fb += size {
+			writeAt := WriteBlock(fb, size)
+			require.Contains(t, DueTables(writeAt), TableRef{fb, size}, "fb=%d size=%d", fb, size)
+		}
+	}
+}
+
+func TestWriteBlockRejectsInvalidSize(t *testing.T) {
+	require.Panics(t, func() { WriteBlock(0, 2) })
+	require.Panics(t, func() { WriteBlock(0, 0) })
+}
+
+func TestMergeGroupRejectsNonMergeableSize(t *testing.T) {
+	require.Panics(t, func() { MergeGroup(0, 1) })
+	require.Panics(t, func() { MergeGroup(0, 2) })
 }

@@ -31,7 +31,8 @@ func isSorted(entries Entries) bool {
 }
 
 // oneTxBlock builds the sorted L0 entries for a single block containing one
-// transaction with two no-topic logs.
+// transaction whose receipt has two logs (the first with one topic, the
+// second with two).
 func oneTxBlock(t *testing.T, block uint64) Entries {
 	t.Helper()
 	parent := common.HexToHash(fmt.Sprintf("0x%064x", block-1))
@@ -60,7 +61,8 @@ func TestMergeFourL0TablesEqualsFullRebuild(t *testing.T) {
 
 	ref := append(Entries(nil), all...)
 	ref.Sort()
-	merged := MergeSorted(streams...)
+	merged, err := MergeSorted(streams...)
+	require.NoError(t, err)
 
 	require.Equal(t, len(ref), len(merged))
 	require.Equal(t, encodedOf(ref), encodedOf(merged))
@@ -71,12 +73,13 @@ func TestMergeFourL0TablesEqualsFullRebuild(t *testing.T) {
 // for merged tables: a table covering blocks [40..43] must contain block
 // entries for blocks 39..42 (the parent entry of each indexed block).
 func TestMergePreservesBlockEntryOffset(t *testing.T) {
-	merged := MergeSorted(
+	merged, err := MergeSorted(
 		oneTxBlock(t, 40),
 		oneTxBlock(t, 41),
 		oneTxBlock(t, 42),
 		oneTxBlock(t, 43),
 	)
+	require.NoError(t, err)
 
 	seen := map[uint64]bool{}
 	for _, e := range merged {
@@ -92,7 +95,8 @@ func TestMergePreservesBlockEntryOffset(t *testing.T) {
 func TestMergePreservesDuplicates(t *testing.T) {
 	a := Entries{NewBlockEntry(39, common.HexToHash("0x11"))}
 	b := Entries{NewBlockEntry(39, common.HexToHash("0x11"))}
-	merged := MergeSorted(a, b)
+	merged, err := MergeSorted(a, b)
+	require.NoError(t, err)
 	require.Len(t, merged, 2)
 	require.Equal(t, merged[0].Encode().String(), merged[1].Encode().String())
 }
@@ -100,7 +104,8 @@ func TestMergePreservesDuplicates(t *testing.T) {
 // TestMergeSortedSkipsEmptyStreams checks that missing sub-tables (for example
 // an early block range where some level-0 tables are absent) simply drop out.
 func TestMergeSortedSkipsEmptyStreams(t *testing.T) {
-	merged := MergeSorted(nil, oneTxBlock(t, 40), nil)
+	merged, err := MergeSorted(nil, oneTxBlock(t, 40), nil)
+	require.NoError(t, err)
 	require.Len(t, merged, len(oneTxBlock(t, 40)))
 	require.True(t, isSorted(merged))
 }
@@ -108,8 +113,44 @@ func TestMergeSortedSkipsEmptyStreams(t *testing.T) {
 // TestMergeSortedSingleStreamDoesNotAlias checks the result is a fresh copy.
 func TestMergeSortedSingleStreamDoesNotAlias(t *testing.T) {
 	src := oneTxBlock(t, 40)
-	got := MergeSorted(src)
+	got, err := MergeSorted(src)
+	require.NoError(t, err)
 	require.Equal(t, encodedOf(src), encodedOf(got))
 	got[0].block = 999
 	require.NotEqual(t, uint64(999), src[0].block)
+}
+
+// TestMergeSortedRejectsUnsortedInput verifies the fail-closed contract: a
+// higher-level table must never be built from unsorted inputs.
+func TestMergeSortedRejectsUnsortedInput(t *testing.T) {
+	block := oneTxBlock(t, 41)                          // sorted
+	unsorted := oneTxBlock(t, 40)                       // sorted
+	unsorted[0], unsorted[1] = unsorted[1], unsorted[0] // now not sorted
+
+	_, err := MergeSorted(block, unsorted)
+	require.ErrorIs(t, err, ErrUnsortedMergeInput)
+
+	_, err = MergeSorted(unsorted)
+	require.ErrorIs(t, err, ErrUnsortedMergeInput)
+}
+
+// TestMergeSortedTieBreakIsDeterministic checks that equal keys from different
+// streams merge in a stable stream order, so repeated merges are reproducible.
+func TestMergeSortedTieBreakIsDeterministic(t *testing.T) {
+	dup := Entries{NewBlockEntry(40, common.HexToHash("0x11"))}
+
+	first, err := MergeSorted(dup, Entries{NewBlockEntry(39, common.HexToHash("0x22"))}, dup)
+	require.NoError(t, err)
+	second, err := MergeSorted(dup, Entries{NewBlockEntry(39, common.HexToHash("0x22"))}, dup)
+	require.NoError(t, err)
+	require.Equal(t, encodedOf(first), encodedOf(second))
+
+	// Deterministic even when the same key appears twice.
+	count := 0
+	for _, e := range first {
+		if e.Type == EntryBlock && e.Value == common.HexToHash("0x11") {
+			count++
+		}
+	}
+	require.Equal(t, 2, count)
 }

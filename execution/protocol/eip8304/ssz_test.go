@@ -38,11 +38,22 @@ func TestListHashRootEmpty(t *testing.T) {
 	require.Equal(t, "0x28ba1834a3a7b657460ce79fa3a1d909ab8828fd557659d4d0554a9bdbc0ec30", root.String())
 }
 
+func TestListHashRootEmptyLimitZero(t *testing.T) {
+	// The EIP text's List[Hash32, entry_count] degenerates to a limit-0 list
+	// for a genesis-empty table: the contents root is the zero hash (depth 0),
+	// and the length mix-in is zero.
+	root, err := ListHashRoot(nil, 0)
+	require.NoError(t, err)
+	require.Equal(t, "0xf5a5fd42d16a20302798ef6ed309979b43003d2320d9f0e8ea9831a92759fb4b", root.String())
+}
+
 func TestListHashRootSingleLeafLowLimit(t *testing.T) {
-	// limit 1 still yields a depth-1 tree (two leaves, one zero).
+	// limit 1 yields a depth-0 tree: the contents root is the leaf itself,
+	// and the table root is hash(leaf || LE uint256(1)). Verified against
+	// Erigon's cl/merkle_tree.GetDepth and remerkleable get_depth semantics.
 	root, err := ListHashRoot([]common.Hash{repeatedByte(0x11)}, 1)
 	require.NoError(t, err)
-	require.Equal(t, "0x4988f33c05f4ca1801a175b5146d382ec35924301d94086b3acee6141a4f4834", root.String())
+	require.Equal(t, "0x28e3a680379879609decd438069ff63676c4f63d7b40b0873c7cdc29a736ecf7", root.String())
 }
 
 func TestListHashRootRejectsExceedingLimit(t *testing.T) {

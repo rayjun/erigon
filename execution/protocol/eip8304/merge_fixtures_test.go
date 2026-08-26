@@ -80,7 +80,8 @@ func TestMergeFixtures(t *testing.T) {
 
 			require.Equal(t, f.Expected.PerBlockL0, perBlock)
 
-			merged := MergeSorted(l0...)
+			merged, err := MergeSorted(l0...)
+			require.NoError(t, err)
 			require.Equal(t, f.Expected.MergedSorted, encodeEntries(merged))
 			require.Equal(t, f.Expected.MergedEntryCount, fmt.Sprintf("0x%x", len(merged)))
 

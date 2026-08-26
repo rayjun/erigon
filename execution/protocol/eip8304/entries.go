@@ -90,21 +90,44 @@ func NewLogTopicEntry(block uint64, transaction, logIndex uint32, topicPosition 
 }
 
 func (e Entry) Encode() EncodedEntry {
-	encoded := make(EncodedEntry, 2+int(e.valueSize)+8)
+	size := 2 + int(e.valueSize) + 8
+	if e.Type != EntryBlock {
+		size += 8
+	}
+	encoded := make(EncodedEntry, size)
 	binary.BigEndian.PutUint16(encoded, uint16(e.Type))
 	copy(encoded[2:2+e.valueSize], e.Value[hashLength-int(e.valueSize):])
 	binary.BigEndian.PutUint64(encoded[2+e.valueSize:], e.block)
 	if e.Type == EntryBlock {
 		return encoded
 	}
-	encoded = binary.BigEndian.AppendUint32(encoded, e.transaction)
-	return binary.BigEndian.AppendUint32(encoded, e.position)
+	binary.BigEndian.PutUint32(encoded[2+e.valueSize+8:], e.transaction)
+	binary.BigEndian.PutUint32(encoded[2+e.valueSize+12:], e.position)
+	return encoded
 }
 
 type Entries []Entry
 
+// Sort orders entries by their canonical encoded representation, the same key
+// the protocol uses for lexicographic table order. Each entry is encoded
+// exactly once; the sort itself compares precomputed keys instead of
+// re-encoding on every comparison.
 func (es Entries) Sort() {
-	slices.SortFunc(es, func(a, b Entry) int {
-		return bytes.Compare(a.Encode(), b.Encode())
+	if len(es) < 2 {
+		return
+	}
+	type keyedEntry struct {
+		entry Entry
+		key   []byte
+	}
+	keyed := make([]keyedEntry, len(es))
+	for i, e := range es {
+		keyed[i] = keyedEntry{entry: e, key: e.Encode()}
+	}
+	slices.SortStableFunc(keyed, func(a, b keyedEntry) int {
+		return bytes.Compare(a.key, b.key)
 	})
+	for i := range keyed {
+		es[i] = keyed[i].entry
+	}
 }

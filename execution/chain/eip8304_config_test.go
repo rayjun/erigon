@@ -50,10 +50,9 @@ func TestConfigEip8304ForkActivation(t *testing.T) {
 	}
 }
 
-// TestConfigEip8304DefaultNetworksNotAffected locks the Milestone 2 invariant:
-// every shipped chainspec never enables the experimental fork, so IsEip8304
-// is always false for its configuration. Configs come from the in-memory
-// registered specs rather than re-reading the JSON files.
+// TestConfigEip8304DefaultNetworksNotAffected locks the invariant that no
+// shipped chainspec enables the experimental fork: IsEip8304 is always false
+// for every registered spec configuration.
 func TestConfigEip8304DefaultNetworksNotAffected(t *testing.T) {
 	shipped := []*chainspec.Spec{
 		&chainspec.Mainnet,
@@ -62,6 +61,7 @@ func TestConfigEip8304DefaultNetworksNotAffected(t *testing.T) {
 		&chainspec.Gnosis,
 		&chainspec.Chiado,
 		&chainspec.Bloatnet,
+		&chainspec.Test,
 	}
 	for _, s := range shipped {
 		t.Run(s.Name, func(t *testing.T) {
@@ -71,13 +71,11 @@ func TestConfigEip8304DefaultNetworksNotAffected(t *testing.T) {
 	}
 }
 
-// TestConfigEip8304DevGenesisNotAffected covers the special development
-// genesis used by --dev mode.
+// TestConfigEip8304DevGenesisNotAffected covers the development genesis used
+// by --dev mode.
 func TestConfigEip8304DevGenesisNotAffected(t *testing.T) {
 	cfg := chainspec.DeveloperGenesisBlock().Config
-	if cfg == nil {
-		return
-	}
+	assert.NotNil(t, cfg)
 	assert.Nil(t, cfg.Eip8304Time)
 	assert.False(t, cfg.IsEip8304(uint64(1<<62)))
 }

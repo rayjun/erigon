@@ -84,8 +84,7 @@ type Config struct {
 	OsakaTime     *uint64 `json:"osakaTime,omitempty"`
 	AmsterdamTime *uint64 `json:"amsterdamTime,omitempty"`
 
-	// Eip8304Time activates the experimental EIP-8304 index fork by timestamp;
-	// never set on shipped networks (nil = not scheduled, 0 = from genesis).
+	// Eip8304Time activates the experimental EIP-8304 index fork; never set on shipped networks.
 	Eip8304Time *uint64 `json:"eip8304Time,omitempty"`
 
 	// Optional EIP-4844 parameters (see also EIP-7691, EIP-7840, EIP-7892)
@@ -483,9 +482,7 @@ func (c *Config) IsOsaka(time uint64) bool {
 	return isForked(c.OsakaTime, time)
 }
 
-// IsEip8304 returns whether time is either equal to the experimental EIP-8304
-// fork time or greater. The fork is not scheduled on any default network; it
-// exists for experimental activation only.
+// IsEip8304 returns whether time is either equal to the experimental EIP-8304 fork time or greater.
 func (c *Config) IsEip8304(time uint64) bool {
 	return isForked(c.Eip8304Time, time)
 }

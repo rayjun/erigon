@@ -28,9 +28,8 @@ import (
 // first_block, table_size, table_root (all big-endian).
 const eip8304CalldataLength = 96
 
-// IndexCalldata encodes the three 32-byte calldata words for the EIP-8304
-// index contract set() call. firstBlock and tableSize fit in uint64; the high
-// bytes of their words are zero. tableRoot is copied as-is.
+// IndexCalldata encodes first_block, table_size, and table_root as three
+// big-endian 32-byte words.
 func IndexCalldata(firstBlock, tableSize uint64, tableRoot common.Hash) []byte {
 	data := make([]byte, eip8304CalldataLength)
 	binary.BigEndian.PutUint64(data[24:32], firstBlock)
@@ -40,10 +39,7 @@ func IndexCalldata(firstBlock, tableSize uint64, tableRoot common.Hash) []byte {
 }
 
 // ApplyIndexEip8304 invokes the index contract update for the due table
-// (firstBlock, tableSize) with the given tableRoot, propagating system call
-// errors. The system call itself runs as SYSTEM_ADDRESS via the caller's
-// syscall closure; a call to an address without code succeeds trivially and
-// is silent, while a real failure (e.g. revert) must fail the block.
+// (firstBlock, tableSize) with tableRoot, propagating system call errors.
 func ApplyIndexEip8304(
 	indexAddr accounts.Address,
 	firstBlock, tableSize uint64,

@@ -84,12 +84,8 @@ type Config struct {
 	OsakaTime     *uint64 `json:"osakaTime,omitempty"`
 	AmsterdamTime *uint64 `json:"amsterdamTime,omitempty"`
 
-	// Eip8304Time activates the experimental EIP-8304 log/transaction index
-	// (trustless log and transaction index). The EIP is still a Draft and its
-	// index contract address, deployment parameters, and SSZ list bound are
-	// unresolved `<TBD>` items tracked in docs/eip8304/spec-lock.md. The field
-	// is an experimental fork only: no shipped network configuration sets it,
-	// so default networks are unaffected (nil = not scheduled, 0 = from genesis).
+	// Eip8304Time activates the experimental EIP-8304 index fork by timestamp;
+	// never set on shipped networks (nil = not scheduled, 0 = from genesis).
 	Eip8304Time *uint64 `json:"eip8304Time,omitempty"`
 
 	// Optional EIP-4844 parameters (see also EIP-7691, EIP-7840, EIP-7892)

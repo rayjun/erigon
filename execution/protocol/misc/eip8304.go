@@ -1,3 +1,19 @@
+// Copyright 2026 The Erigon Authors
+// This file is part of Erigon.
+//
+// Erigon is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Lesser General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Erigon is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Lesser General Public License for more details.
+//
+// You should have received a copy of the GNU Lesser General Public License
+// along with Erigon. If not, see <http://www.gnu.org/licenses/>.
+
 package misc
 
 import (
@@ -23,15 +39,11 @@ func IndexCalldata(firstBlock, tableSize uint64, tableRoot common.Hash) []byte {
 	return data
 }
 
-// ApplyIndexEip8304 invokes the protocol-mandated index contract update for a
-// due table (firstBlock, tableSize) with the given tableRoot. The caller is
-// the SYSTEM_ADDRESS and the callee is the (parameterized) index address.
-//
-// Failure semantics per spec-lock: a call to an address without code succeeds
-// trivially in the EVM and is therefore silently harmless, while any real
-// failure (e.g. a revert, which the index contract must not do on a
-// well-formed set() call) must fail the block. This helper therefore
-// propagates syscall errors instead of swallowing them.
+// ApplyIndexEip8304 invokes the index contract update for the due table
+// (firstBlock, tableSize) with the given tableRoot, propagating system call
+// errors. The system call itself runs as SYSTEM_ADDRESS via the caller's
+// syscall closure; a call to an address without code succeeds trivially and
+// is silent, while a real failure (e.g. revert) must fail the block.
 func ApplyIndexEip8304(
 	indexAddr accounts.Address,
 	firstBlock, tableSize uint64,

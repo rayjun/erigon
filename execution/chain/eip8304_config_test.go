@@ -1,14 +1,28 @@
+// Copyright 2026 The Erigon Authors
+// This file is part of Erigon.
+//
+// Erigon is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Lesser General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Erigon is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Lesser General Public License for more details.
+//
+// You should have received a copy of the GNU Lesser General Public License
+// along with Erigon. If not, see <http://www.gnu.org/licenses/>.
+
 package chain_test
 
 import (
-	"encoding/json"
-	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/erigontech/erigon/execution/chain"
+	chainspec "github.com/erigontech/erigon/execution/chain/spec"
 )
 
 // TestConfigEip8304ForkActivation covers the experimental fork scheduling:
@@ -37,25 +51,35 @@ func TestConfigEip8304ForkActivation(t *testing.T) {
 }
 
 // TestConfigEip8304DefaultNetworksNotAffected locks the Milestone 2 invariant:
-// default chainspecs never enable the experimental fork, so IsEip8304 is
-// always false for their configurations.
+// every shipped chainspec never enables the experimental fork, so IsEip8304
+// is always false for its configuration. Configs come from the in-memory
+// registered specs rather than re-reading the JSON files.
 func TestConfigEip8304DefaultNetworksNotAffected(t *testing.T) {
-	for _, name := range []string{"mainnet", "sepolia", "hoodi"} {
-		t.Run(name, func(t *testing.T) {
-			cfg := readChainspecConfig(t, name)
-			assert.Nil(t, cfg.Eip8304Time, "%s must not schedule the experimental fork", name)
-			assert.False(t, cfg.IsEip8304(uint64(1<<62)), "%s must not be EIP-8304 active", name)
+	shipped := []*chainspec.Spec{
+		&chainspec.Mainnet,
+		&chainspec.Sepolia,
+		&chainspec.Hoodi,
+		&chainspec.Gnosis,
+		&chainspec.Chiado,
+		&chainspec.Bloatnet,
+	}
+	for _, s := range shipped {
+		t.Run(s.Name, func(t *testing.T) {
+			assert.Nil(t, s.Config.Eip8304Time, "%s must not schedule the experimental fork", s.Name)
+			assert.False(t, s.Config.IsEip8304(uint64(1<<62)), "%s must not be EIP-8304 active", s.Name)
 		})
 	}
 }
 
-func readChainspecConfig(t *testing.T, network string) *chain.Config {
-	t.Helper()
-	raw, err := os.ReadFile("spec/chainspecs/" + network + ".json")
-	require.NoError(t, err, "cannot read chainspec for %s", network)
-	var cfg chain.Config
-	require.NoError(t, json.Unmarshal(raw, &cfg), "cannot parse chainspec for %s", network)
-	return &cfg
+// TestConfigEip8304DevGenesisNotAffected covers the special development
+// genesis used by --dev mode.
+func TestConfigEip8304DevGenesisNotAffected(t *testing.T) {
+	cfg := chainspec.DeveloperGenesisBlock().Config
+	if cfg == nil {
+		return
+	}
+	assert.Nil(t, cfg.Eip8304Time)
+	assert.False(t, cfg.IsEip8304(uint64(1<<62)))
 }
 
 func ptr64(v uint64) *uint64 { return &v }

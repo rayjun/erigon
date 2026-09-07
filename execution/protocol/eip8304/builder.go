@@ -17,7 +17,34 @@ var (
 	ErrTooManyTransactions  = errors.New("too many transactions")
 	ErrTooManyLogs          = errors.New("too many logs")
 	ErrTooManyLogTopics     = errors.New("too many log topics")
+	ErrMissingTxHash        = errors.New("receipt has no transaction hash")
 )
+
+// BuildBlockEntriesFromReceipts builds the block's entries from its receipts
+// alone, using each receipt's TxHash (filled by DeriveFields* on the caller
+// side) as the ordered transaction hash. It fails closed when an expected
+// TxHash is missing, so a receipt that has not been derived cannot silently
+// produce a table with zero transaction hashes.
+func BuildBlockEntriesFromReceipts(
+	block uint64,
+	parentBlockHash common.Hash,
+	receipts types.Receipts,
+) (Entries, error) {
+	if len(receipts) > math.MaxUint32 {
+		return nil, ErrTooManyTransactions
+	}
+	transactionHashes := make([]common.Hash, len(receipts))
+	for i, receipt := range receipts {
+		if receipt == nil {
+			return nil, fmt.Errorf("%w at transaction %d", ErrNilReceipt, i)
+		}
+		if receipt.TxHash == (common.Hash{}) {
+			return nil, fmt.Errorf("%w at transaction %d", ErrMissingTxHash, i)
+		}
+		transactionHashes[i] = receipt.TxHash
+	}
+	return buildBlockEntriesFromHashes(block, parentBlockHash, transactionHashes, receipts)
+}
 
 // BuildBlockEntries returns entries in block execution order; callers must sort them before table hashing.
 func BuildBlockEntries(

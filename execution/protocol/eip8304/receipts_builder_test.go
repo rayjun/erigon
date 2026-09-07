@@ -20,7 +20,7 @@ func receiptsWithTxHashes(transactions types.Transactions) types.Receipts {
 	return receipts
 }
 
-// TestBuildBlockEntriesFromReceiptsEqualsTransactionPath locks the Week 12
+// TestBuildBlockEntriesFromReceiptsEqualsTransactionPath locks the
 // input-source contract: building entries from receipts alone (via TxHash)
 // must produce exactly the same entries as building from the transactions
 // themselves, so the Finalize path can reconstruct ordered hashes without a

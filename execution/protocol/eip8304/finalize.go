@@ -3,27 +3,23 @@ package eip8304
 import (
 	"github.com/erigontech/erigon/common"
 	"github.com/erigontech/erigon/execution/protocol/misc"
+	"github.com/erigontech/erigon/execution/protocol/rules"
 	"github.com/erigontech/erigon/execution/types"
 	"github.com/erigontech/erigon/execution/types/accounts"
 )
 
-// FinalizeL0 runs the whole level-0 side of the EIP-8304 finalization for one
-// block: build the sorted L0 entries from the block's receipts, compute the
-// SSZ list root under the given limit, and apply the index contract update
-// (firstBlock = block, tableSize = 1). The index address and the SSZ list
-// limit are explicit arguments — no unconfirmed value is defaulted.
-//
-// It is the composition the shared Finalize paths will call once the
-// integration points are confirmed; it does not itself touch Finalize, so
-// default networks are unaffected until the caller wires it behind
-// config.IsEip8304.
+// FinalizeL0 builds the sorted L0 entries for a block from its receipts,
+// computes the SSZ list root under the given limit, and applies the index
+// contract update for the block's level-0 table (firstBlock = block,
+// tableSize = 1). The index address and the SSZ list limit are explicit
+// arguments; no unconfirmed value is defaulted.
 func FinalizeL0(
 	block uint64,
 	parentBlockHash common.Hash,
 	receipts types.Receipts,
 	indexAddr accounts.Address,
 	listLimit uint64,
-	syscall func(addr accounts.Address, data []byte) ([]byte, error),
+	syscall rules.SystemCall,
 ) error {
 	entries, err := BuildBlockEntriesFromReceipts(block, parentBlockHash, receipts)
 	if err != nil {
@@ -40,5 +36,6 @@ func FinalizeL0(
 		return err
 	}
 
-	return misc.ApplyIndexEip8304(indexAddr, block, 1, root, syscall)
+	table := L0(block)
+	return misc.ApplyIndexEip8304(indexAddr, table.FirstBlock, table.TableSize, root, syscall)
 }

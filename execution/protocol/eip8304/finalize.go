@@ -12,7 +12,7 @@ import (
 // computes the SSZ list root under the given limit, and applies the index
 // contract update for the block's level-0 table (firstBlock = block,
 // tableSize = 1). The index address and the SSZ list limit are explicit
-// arguments; no unconfirmed value is defaulted.
+// arguments.
 func FinalizeL0(
 	block uint64,
 	parentBlockHash common.Hash,

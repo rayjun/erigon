@@ -84,50 +84,64 @@ func TestFinalizeL0Composition(t *testing.T) {
 	require.Equal(t, misc.IndexCalldata(42, 1, wantSorted), gotData, "calldata must be (first_block=42, table_size=1, sorted root)")
 }
 
-// TestFinalizeL0GenesisLocks the genesis boundary: first_block = 0, no parent
-// entry, and the system call still runs once for the L0 table.
+// TestFinalizeL0Genesis locks the genesis boundary: the applied table is
+// (firstBlock=0, tableSize=1), contains exactly the single transaction entry
+// (no parent leaf), and the system call still runs. The expected root is
+// computed independently from the entry constructor, not from the builder, so
+// a regression that adds a parent entry to genesis would fail this test.
 func TestFinalizeL0Genesis(t *testing.T) {
 	transaction := types.NewTransaction(0, common.Address{}, uint256.NewInt(0), 21_000, uint256.NewInt(1), nil)
 	receipts := types.Receipts{{TxHash: transaction.Hash(), Logs: types.Logs{}}}
 
+	var gotData []byte
 	calls := 0
 	var syscall rules.SystemCall = func(addr accounts.Address, data []byte) ([]byte, error) {
 		calls++
+		gotData = append([]byte(nil), data...)
 		return nil, nil
 	}
 
 	err := FinalizeL0(0, common.Hash{}, receipts, accounts.Address{}, 1<<6, syscall)
 	require.NoError(t, err)
 	require.Equal(t, 1, calls, "L0 must still be applied for genesis")
+
+	txEntry := NewTransactionEntry(0, 0, 0, transaction.Hash())
+	wantRoot, err := ListHashRoot([]common.Hash{txEntry.Encode().LeafHash()}, 1<<6)
+	require.NoError(t, err)
+	require.Equal(t, misc.IndexCalldata(0, 1, wantRoot), gotData, "calldata must be (first_block=0, table_size=1, single-tx root)")
 }
 
 // TestFinalizeL0EmptyNonGenesis locks the empty-block boundary: a non-genesis
-// block with no transactions still produces one parent-block leaf and must
-// call the system contract.
+// block with no transactions still applies its L0 table, whose single leaf is
+// the parent-block entry. The expected root is computed independently from
+// NewBlockEntry, and the whole calldata is compared, so an off-by-one in the
+// parent block number or a high-byte leak in the words cannot slip through.
 func TestFinalizeL0EmptyNonGenesis(t *testing.T) {
-	calls := 0
-	var last []byte
+	parent := common.HexToHash("0x11")
+	var gotData []byte
 	var syscall rules.SystemCall = func(addr accounts.Address, data []byte) ([]byte, error) {
-		calls++
-		last = append([]byte(nil), data...)
+		gotData = append([]byte(nil), data...)
 		return nil, nil
 	}
 
-	parent := common.HexToHash("0x11")
 	err := FinalizeL0(5, parent, nil, accounts.Address{}, 1<<2, syscall)
 	require.NoError(t, err)
-	require.Equal(t, 1, calls, "empty non-genesis block must still apply its L0 (single parent leaf)")
-	require.Equal(t, uint64(5), binaryBigEndianUint(last[24:32]), "first_block word must be the block itself")
+
+	parentEntry := NewBlockEntry(4, parent)
+	wantRoot, err := ListHashRoot([]common.Hash{parentEntry.Encode().LeafHash()}, 1<<2)
+	require.NoError(t, err)
+	require.Equal(t, misc.IndexCalldata(5, 1, wantRoot), gotData, "calldata must be (first_block=5, table_size=1, parent-entry root)")
 }
 
 // TestFinalizeL0ListLimitRejected covers the limit boundary: more leaves than
-// the SSZ limit rejects before any system call.
+// the SSZ limit rejects before any system call. Block 42 with two no-log
+// receipts yields three leaves (parent + two tx entries), exceeding limit 2.
 func TestFinalizeL0ListLimitRejected(t *testing.T) {
 	transactions := types.Transactions{
 		types.NewTransaction(0, common.Address{}, uint256.NewInt(0), 21_000, uint256.NewInt(1), nil),
 		types.NewTransaction(1, common.Address{}, uint256.NewInt(0), 21_000, uint256.NewInt(1), nil),
 	}
-	receipts := receiptsWithTxHashes(transactions) // 2 leaves (2 tx entries, non-genesis adds a parent at 42)
+	receipts := receiptsWithTxHashes(transactions)
 
 	called := false
 	var syscall rules.SystemCall = func(addr accounts.Address, data []byte) ([]byte, error) {
@@ -165,8 +179,3 @@ func TestFinalizeL0FailClosed(t *testing.T) {
 type testSyscallError struct{}
 
 func (*testSyscallError) Error() string { return "revert" }
-
-func binaryBigEndianUint(b []byte) uint64 {
-	return uint64(b[0])<<56 | uint64(b[1])<<48 | uint64(b[2])<<40 | uint64(b[3])<<32 |
-		uint64(b[4])<<24 | uint64(b[5])<<16 | uint64(b[6])<<8 | uint64(b[7])
-}

@@ -78,3 +78,31 @@ func TestBuildBlockEntriesFromReceiptsTooManyTopics(t *testing.T) {
 	_, err := BuildBlockEntriesFromReceipts(42, common.Hash{}, receipts)
 	require.ErrorIs(t, err, ErrTooManyLogTopics)
 }
+
+// TestBuildBlockEntriesFromReceiptsGenesisWithTransactions locks the genesis
+// boundary on the receipts-only path: block 0 emits no parent entry, but its
+// transactions and logs are still indexed.
+func TestBuildBlockEntriesFromReceiptsGenesisWithTransactions(t *testing.T) {
+	transactions := types.Transactions{
+		types.NewTransaction(0, common.Address{}, uint256.NewInt(0), 21_000, uint256.NewInt(1), nil),
+	}
+	receipts := receiptsWithTxHashes(transactions)
+	receipts[0].Logs = types.Logs{{Address: common.HexToAddress("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")}}
+
+	entries, err := BuildBlockEntriesFromReceipts(0, common.Hash{}, receipts)
+	require.NoError(t, err)
+	require.Len(t, entries, 2) // transaction entry + log address entry, no parent block entry
+	require.Equal(t, EntryTransaction, entries[0].Type)
+	require.Equal(t, EntryLogAddress, entries[1].Type)
+}
+
+// TestBuildBlockEntriesFromReceiptsEmptyBlock locks the empty non-genesis block
+// boundary: exactly one parent-block entry, no transactions.
+func TestBuildBlockEntriesFromReceiptsEmptyBlock(t *testing.T) {
+	entries, err := BuildBlockEntriesFromReceipts(42, common.HexToHash("0x01"), nil)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, EntryBlock, entries[0].Type)
+	require.Equal(t, uint64(41), entries[0].block)
+	require.Equal(t, common.HexToHash("0x01"), entries[0].Value)
+}

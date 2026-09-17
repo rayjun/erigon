@@ -107,6 +107,13 @@ func (s *chainStore) parentHash(block uint64) common.Hash {
 
 func newTestChain(t *testing.T, count int) *chainStore {
 	t.Helper()
+	return newTestChainWith(t, count, testReceipts)
+}
+
+// newTestChainWith is newTestChain with per-block receipts, so a test can leave
+// a block — typically genesis — without transactions.
+func newTestChainWith(t *testing.T, count int, receiptsFor func(block uint64) types.Receipts) *chainStore {
+	t.Helper()
 	store := &chainStore{
 		hashes:    make(map[uint64]common.Hash, count),
 		receipts:  make(map[uint64]types.Receipts, count),
@@ -118,7 +125,7 @@ func newTestChain(t *testing.T, count int) *chainStore {
 		store.hashes[block] = testHash(block)
 	}
 	for block := uint64(0); block < uint64(count); block++ {
-		receipts := testReceipts(block)
+		receipts := receiptsFor(block)
 		store.receipts[block] = receipts
 		entries, err := BuildBlockEntriesFromReceipts(block, store.parentHash(block), receipts)
 		require.NoError(t, err)
@@ -336,6 +343,33 @@ func TestResolverRebuildsRejectedResults(t *testing.T) {
 	}
 }
 
+// TestResolverRejectsInvalidTableRef covers the reference validation: a size
+// outside TABLE_SIZES and a first_block that is not a multiple of table_size
+// are both rejected before any store read.
+func TestResolverRejectsInvalidTableRef(t *testing.T) {
+	store := newTestChain(t, 8)
+	resolver := NewResolver(store, 1<<12)
+
+	for _, ref := range []TableRef{
+		{FirstBlock: 0, TableSize: 8},
+		{FirstBlock: 6, TableSize: 4},
+	} {
+		_, err := resolver.Table(ref)
+		require.ErrorIs(t, err, ErrInvalidTableRef, "ref %+v", ref)
+	}
+}
+
+// TestResolverRejectsNilInputs covers the resolver's own required-input checks,
+// which ApplyDueTables performs too but which Table must also enforce.
+func TestResolverRejectsNilInputs(t *testing.T) {
+	var nilResolver *Resolver
+	_, err := nilResolver.Table(L0(0))
+	require.ErrorIs(t, err, ErrNilTableResolver)
+
+	_, err = NewResolver(nil, 1<<12).Table(L0(0))
+	require.ErrorIs(t, err, ErrNilTableStore)
+}
+
 // TestResolverFailsClosedOnMissingBlockData covers the fail-closed rule: a
 // rebuild that cannot obtain a covered block's data returns an error instead of
 // producing a partial root or silently skipping the table.
@@ -430,6 +464,57 @@ func TestApplyDueTablesWritesDelayedRoots(t *testing.T) {
 	// block 319, and it reuses the four verified (x,64) tables written earlier.
 	require.Contains(t, got, TableRef{FirstBlock: 0, TableSize: 256})
 	require.Greater(t, resolver.Stats().Hits, 0)
+}
+
+// TestApplyDueTablesGenesisEmptyTable covers a genesis block with no
+// transactions: its level-0 table has zero entries, is still written, and the
+// empty table verifies when a later higher-level table reads it from the cache.
+func TestApplyDueTablesGenesisEmptyTable(t *testing.T) {
+	const (
+		blocks = 8
+		limit  = uint64(1 << 12)
+	)
+	store := newTestChainWith(t, blocks, func(block uint64) types.Receipts {
+		if block == 0 {
+			return nil
+		}
+		return testReceipts(block)
+	})
+	resolver := NewResolver(store, limit)
+	indexAddr := accounts.InternAddress(common.HexToAddress("0x0000000000000000000000000000000000000005"))
+
+	var got []TableRef
+	var roots []common.Hash
+	syscall := func(addr accounts.Address, data []byte) ([]byte, error) {
+		ref, root := decodeIndexCall(t, data)
+		got = append(got, ref)
+		roots = append(roots, root)
+		return nil, nil
+	}
+
+	for block := uint64(0); block < blocks; block++ {
+		store.available = block
+		_, err := ApplyDueTables(block, testHash(block), store.parentHash(block), store.receipts[block], indexAddr, activeAlways, resolver, syscall)
+		require.NoError(t, err)
+	}
+	store.available = blocks
+
+	emptyRoot, err := RootOfEntries(nil, limit)
+	require.NoError(t, err)
+	require.Equal(t, L0(0), got[0])
+	require.Equal(t, emptyRoot, roots[0], "genesis with no transactions is an empty level-0 table")
+
+	genesis, ok := store.GetTable(L0(0))
+	require.True(t, ok)
+	require.Equal(t, uint64(0), genesis.EntryCount)
+	require.Empty(t, genesis.Entries)
+	require.NoError(t, VerifyTable(genesis, L0(0), store, limit))
+
+	// The (0,4) table merged the empty genesis table with three non-empty ones.
+	require.Contains(t, got, TableRef{FirstBlock: 0, TableSize: 4})
+	for i, ref := range got {
+		require.Equal(t, oracleRoot(t, store, ref, limit), roots[i], "root for %+v", ref)
+	}
 }
 
 // TestApplyDueTablesSkipsTablesInactiveAtFirstBlock covers the EIP rule that a

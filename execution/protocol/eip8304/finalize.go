@@ -1,6 +1,8 @@
 package eip8304
 
 import (
+	"fmt"
+
 	"github.com/erigontech/erigon/common"
 	"github.com/erigontech/erigon/execution/protocol/misc"
 	"github.com/erigontech/erigon/execution/protocol/rules"
@@ -48,8 +50,16 @@ func FinalizeL0(
 // applies the chain's own activation rule here.
 //
 // A table is recorded as canonical only after its system call succeeded. On
-// failure ApplyDueTables stops: the returned refs are the tables applied so
-// far, and neither the failed table nor any later one is written or recorded.
+// failure ApplyDueTables stops at that table: the returned refs are the tables
+// applied so far, and neither the failed table nor any later one is written or
+// recorded.
+//
+// The caller must treat any error as aborting the block, so writes from earlier
+// system calls are discarded with the rest of the state transition. The error
+// also separates two cases the caller must not conflate: a wrapped
+// ErrMissingBlockData or ErrExceedsListLimit means this node cannot compute the
+// table (fail closed, do not advance the chain), while a system call error means
+// the block itself is invalid.
 func ApplyDueTables(
 	block uint64,
 	blockHash common.Hash,
@@ -104,6 +114,12 @@ func dueTableResult(
 ) (TableResult, error) {
 	if ref.TableSize != 1 {
 		return resolver.Table(ref)
+	}
+	// DueTables always yields the processed block's own level-0 table, and the
+	// store cannot supply it yet: the in-flight block is not in the store, so
+	// these entries may only come from the receipts passed in here.
+	if ref.FirstBlock != block {
+		return TableResult{}, fmt.Errorf("%w: level-0 table %d is not the processed block %d", ErrInvalidTableRef, ref.FirstBlock, block)
 	}
 
 	entries, err := BuildBlockEntriesFromReceipts(block, parentBlockHash, receipts)

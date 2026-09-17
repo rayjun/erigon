@@ -27,15 +27,107 @@ func FinalizeL0(
 	}
 	entries.Sort()
 
-	leaves := make([]common.Hash, len(entries))
-	for i, e := range entries {
-		leaves[i] = e.Encode().LeafHash()
-	}
-	root, err := ListHashRoot(leaves, listLimit)
+	root, err := RootOfEntries(entries, listLimit)
 	if err != nil {
 		return err
 	}
 
 	table := L0(block)
 	return misc.ApplyIndexEip8304(indexAddr, table.FirstBlock, table.TableSize, root, syscall)
+}
+
+// ApplyDueTables applies every protocol table whose write moment is `block`: the
+// level-0 table for `block`, built from the block's receipts, and at most one
+// higher-level table, resolved through the resolver. Tables are applied in the
+// order DueTables returns, i.e. ascending table size, so the L0 write of the
+// processed block always happens first.
+//
+// A higher-level table may use a verified precomputed result; if that result is
+// missing, corrupt or bound to an old chain, the resolver rebuilds it
+// synchronously from canonical block data instead of skipping the write or
+// publishing a temporary root.
+//
+// `activeAt` reports whether the EIP was already active at a table's first
+// block; the EIP generates a table only if it was. It must not be nil, so that
+// activation is always an explicit, testable input rather than a silent
+// default. Note that `firstBlock` is a block number: when activation is
+// configured as a timestamp (chain.Config.Eip8304Time), the caller owns the
+// block-to-time mapping and must apply the chain's own activation rule here.
+//
+// A table is recorded as canonical only after its system call succeeded. On
+// failure ApplyDueTables stops: the returned slice holds the tables applied so
+// far, the error is the cause, and neither the failed table nor any later one
+// is written or recorded.
+func ApplyDueTables(
+	block uint64,
+	blockHash common.Hash,
+	parentBlockHash common.Hash,
+	receipts types.Receipts,
+	indexAddr accounts.Address,
+	activeAt func(firstBlock uint64) bool,
+	resolver *Resolver,
+	syscall rules.SystemCall,
+) ([]TableRef, error) {
+	if activeAt == nil {
+		return nil, ErrNilActivationPredicate
+	}
+	if resolver == nil {
+		return nil, ErrNilTableResolver
+	}
+	if resolver.store == nil {
+		return nil, ErrNilTableStore
+	}
+
+	applied := make([]TableRef, 0, 2)
+	for _, ref := range DueTables(block) {
+		if !activeAt(ref.FirstBlock) {
+			continue
+		}
+		result, err := dueTableResult(ref, block, blockHash, parentBlockHash, receipts, resolver)
+		if err != nil {
+			return applied, err
+		}
+		if err := misc.ApplyIndexEip8304(indexAddr, ref.FirstBlock, ref.TableSize, result.Root, syscall); err != nil {
+			return applied, err
+		}
+		resolver.store.PutTable(result)
+		applied = append(applied, ref)
+	}
+	return applied, nil
+}
+
+// dueTableResult produces the root to write for one due table. The level-0 table
+// of the block being processed is built from the receipts passed to
+// ApplyDueTables; every other table comes from the resolver. A higher-level
+// table due at `block` never covers `block` itself (its range ends at least
+// table_size/4 blocks earlier), so the resolver never needs the in-flight
+// block's entries.
+func dueTableResult(
+	ref TableRef,
+	block uint64,
+	blockHash common.Hash,
+	parentBlockHash common.Hash,
+	receipts types.Receipts,
+	resolver *Resolver,
+) (TableResult, error) {
+	if ref.TableSize != 1 {
+		return resolver.Table(ref)
+	}
+
+	entries, err := BuildBlockEntriesFromReceipts(block, parentBlockHash, receipts)
+	if err != nil {
+		return TableResult{}, err
+	}
+	entries.Sort()
+	root, err := RootOfEntries(entries, resolver.listLimit)
+	if err != nil {
+		return TableResult{}, err
+	}
+	return TableResult{
+		Ref:         ref,
+		EntryCount:  uint64(len(entries)),
+		Entries:     entries,
+		Root:        root,
+		BlockHashes: []common.Hash{blockHash},
+	}, nil
 }

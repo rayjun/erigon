@@ -36,28 +36,20 @@ func FinalizeL0(
 	return misc.ApplyIndexEip8304(indexAddr, table.FirstBlock, table.TableSize, root, syscall)
 }
 
-// ApplyDueTables applies every protocol table whose write moment is `block`: the
-// level-0 table for `block`, built from the block's receipts, and at most one
-// higher-level table, resolved through the resolver. Tables are applied in the
-// order DueTables returns, i.e. ascending table size, so the L0 write of the
-// processed block always happens first.
-//
-// A higher-level table may use a verified precomputed result; if that result is
-// missing, corrupt or bound to an old chain, the resolver rebuilds it
-// synchronously from canonical block data instead of skipping the write or
-// publishing a temporary root.
+// ApplyDueTables applies every protocol table whose write moment is `block`, in
+// the order DueTables returns, i.e. ascending table size, so the level-0 table
+// of the processed block is written first. The level-0 table is built from the
+// block's receipts; higher-level tables come from the resolver.
 //
 // `activeAt` reports whether the EIP was already active at a table's first
-// block; the EIP generates a table only if it was. It must not be nil, so that
-// activation is always an explicit, testable input rather than a silent
-// default. Note that `firstBlock` is a block number: when activation is
-// configured as a timestamp (chain.Config.Eip8304Time), the caller owns the
-// block-to-time mapping and must apply the chain's own activation rule here.
+// block and is required; so is the resolver. `activeAt` receives a block
+// number: when activation is configured as a timestamp
+// (chain.Config.Eip8304Time), the caller owns the block-to-time mapping and
+// applies the chain's own activation rule here.
 //
 // A table is recorded as canonical only after its system call succeeded. On
-// failure ApplyDueTables stops: the returned slice holds the tables applied so
-// far, the error is the cause, and neither the failed table nor any later one
-// is written or recorded.
+// failure ApplyDueTables stops: the returned refs are the tables applied so
+// far, and neither the failed table nor any later one is written or recorded.
 func ApplyDueTables(
 	block uint64,
 	blockHash common.Hash,

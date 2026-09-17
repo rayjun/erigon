@@ -65,11 +65,16 @@ type chainStore struct {
 	blocks   map[uint64]Entries
 	cached   map[TableRef]TableResult
 	puts     []TableRef
+	// available is the exclusive upper bound of blocks the store exposes. A
+	// finalization test sets it to the block being processed so the in-flight
+	// block is genuinely absent: its L0 must come from the receipts, and a
+	// resolver that read it would fail instead of getting it for free.
+	available uint64
 }
 
 func (s *chainStore) CanonicalHash(block uint64) (common.Hash, error) {
 	hash, ok := s.hashes[block]
-	if !ok {
+	if !ok || block >= s.available {
 		return common.Hash{}, fmt.Errorf("%w: hash for block %d", ErrMissingBlockData, block)
 	}
 	return hash, nil
@@ -77,7 +82,7 @@ func (s *chainStore) CanonicalHash(block uint64) (common.Hash, error) {
 
 func (s *chainStore) BlockEntries(block uint64) (Entries, error) {
 	entries, ok := s.blocks[block]
-	if !ok {
+	if !ok || block >= s.available {
 		return nil, fmt.Errorf("%w: entries for block %d", ErrMissingBlockData, block)
 	}
 	return append(Entries(nil), entries...), nil
@@ -103,10 +108,11 @@ func (s *chainStore) parentHash(block uint64) common.Hash {
 func newTestChain(t *testing.T, count int) *chainStore {
 	t.Helper()
 	store := &chainStore{
-		hashes:   make(map[uint64]common.Hash, count),
-		receipts: make(map[uint64]types.Receipts, count),
-		blocks:   make(map[uint64]Entries, count),
-		cached:   make(map[TableRef]TableResult),
+		hashes:    make(map[uint64]common.Hash, count),
+		receipts:  make(map[uint64]types.Receipts, count),
+		blocks:    make(map[uint64]Entries, count),
+		cached:    make(map[TableRef]TableResult),
+		available: uint64(count),
 	}
 	for block := uint64(0); block < uint64(count); block++ {
 		store.hashes[block] = testHash(block)
@@ -230,24 +236,44 @@ func TestResolverReusesVerifiedChildrenDuringNestedRebuild(t *testing.T) {
 	})
 
 	t.Run("one corrupted branch", func(t *testing.T) {
-		store := newTestChain(t, 32)
-		children := seed(t, store)
+		cases := []struct {
+			name    string
+			corrupt func(TableResult) TableResult
+			wantErr error
+		}{
+			{"child root does not match entries", func(r TableResult) TableResult {
+				r.Root = common.HexToHash("0xbad")
+				return r
+			}, ErrTableRootMismatch},
+			{"child bound to an old chain", func(r TableResult) TableResult {
+				r.BlockHashes[0] = common.HexToHash("0xfeed")
+				return r
+			}, ErrTableNotCanonical},
+		}
+		for _, testCase := range cases {
+			t.Run(testCase.name, func(t *testing.T) {
+				store := newTestChain(t, 32)
+				children := seed(t, store)
 
-		bad := store.cached[children[1]]
-		bad.Root = common.HexToHash("0xbad")
-		store.cached[children[1]] = bad
+				// Deep-copy the hash slice so corrupting it cannot leak into the
+				// result the seed resolver produced.
+				bad := store.cached[children[1]]
+				bad.BlockHashes = append([]common.Hash(nil), bad.BlockHashes...)
+				store.cached[children[1]] = testCase.corrupt(bad)
 
-		resolver := NewResolver(store, limit)
-		got, err := resolver.Table(ref)
-		require.NoError(t, err)
-		require.Equal(t, oracleRoot(t, store, ref, limit), got.Root)
+				resolver := NewResolver(store, limit)
+				got, err := resolver.Table(ref)
+				require.NoError(t, err)
+				require.Equal(t, oracleRoot(t, store, ref, limit), got.Root)
 
-		stats := resolver.Stats()
-		require.Equal(t, 3, stats.Hits, "the other three children must still be reused")
-		require.Equal(t, 1, stats.Rejected)
-		require.ErrorIs(t, stats.LastReject, ErrTableRootMismatch)
-		// The top level, the rejected child, and that child's four level-0 tables.
-		require.Equal(t, 6, stats.Rebuilds)
+				stats := resolver.Stats()
+				require.Equal(t, 3, stats.Hits, "the other three children must still be reused")
+				require.Equal(t, 1, stats.Rejected)
+				require.ErrorIs(t, stats.LastReject, testCase.wantErr)
+				// The top level, the rejected child, and that child's four level-0 tables.
+				require.Equal(t, 6, stats.Rebuilds)
+			})
+		}
 	})
 }
 
@@ -322,6 +348,18 @@ func TestResolverFailsClosedOnMissingBlockData(t *testing.T) {
 	require.ErrorContains(t, err, "block 2")
 }
 
+// TestResolverFailsClosedOnInFlightBlock covers the finalization-time
+// invariant that the block being processed is not in the store yet: a table
+// that needs it cannot be resolved from cache or rebuilt, and must fail rather
+// than read data that does not exist yet.
+func TestResolverFailsClosedOnInFlightBlock(t *testing.T) {
+	store := newTestChain(t, 8)
+	store.available = 4 // blocks 0..3 are on chain; block 4 is in flight
+
+	_, err := NewResolver(store, 1<<12).Table(TableRef{FirstBlock: 4, TableSize: 4})
+	require.ErrorIs(t, err, ErrMissingBlockData)
+}
+
 // TestApplyDueTablesWritesDelayedRoots runs a chain end to end and checks the
 // full write sequence against independently computed expectations: L0 at every
 // block, each higher level exactly at its delayed write block, and every root
@@ -348,10 +386,15 @@ func TestApplyDueTablesWritesDelayedRoots(t *testing.T) {
 	}
 
 	for block := uint64(0); block < blocks; block++ {
+		// The block being finalized is not in the store yet: every table must
+		// still be produced from receipts or from earlier blocks, so a resolver
+		// that depended on the in-flight block would fail closed here.
+		store.available = block
 		applied, err := ApplyDueTables(block, testHash(block), store.parentHash(block), store.receipts[block], indexAddr, activeAlways, resolver, syscall)
 		require.NoError(t, err)
 		require.NotEmpty(t, applied)
 	}
+	store.available = blocks
 
 	// Independent schedule: a table (first_block, table_size) is written at
 	// first_block + table_size - 1 + table_size/4.
@@ -410,6 +453,7 @@ func TestApplyDueTablesSkipsTablesInactiveAtFirstBlock(t *testing.T) {
 	}
 
 	for block := uint64(0); block < blocks; block++ {
+		store.available = block
 		applied, err := ApplyDueTables(block, testHash(block), store.parentHash(block), store.receipts[block], indexAddr, activeAt, resolver, syscall)
 		require.NoError(t, err)
 		if activeAt(block) {
@@ -448,11 +492,13 @@ func TestApplyDueTablesDoesNotRecordFailedTable(t *testing.T) {
 	}
 
 	for block := uint64(0); block < 4; block++ {
+		store.available = block
 		applied, err := ApplyDueTables(block, testHash(block), store.parentHash(block), store.receipts[block], indexAddr, activeAlways, resolver, syscall)
 		require.NoError(t, err)
 		require.Equal(t, []TableRef{L0(block)}, applied)
 	}
 
+	store.available = 4
 	applied, err := ApplyDueTables(4, testHash(4), store.parentHash(4), store.receipts[4], indexAddr, activeAlways, resolver, syscall)
 	require.ErrorIs(t, err, boom)
 	require.Equal(t, []TableRef{L0(4)}, applied, "only the L0 write succeeded before the failure")

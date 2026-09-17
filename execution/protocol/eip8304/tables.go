@@ -39,12 +39,10 @@ var (
 // entries, the SSZ root of those entries, and the canonical block hashes it is
 // bound to.
 //
-// BlockHashes covers the table's block range [FirstBlock, FirstBlock+TableSize-1],
-// the range the EIP identifies a table with. Binding to that range is enough to
-// detect stale data: a reorg that changes any block in the range also changes
-// the hash of that block and of every descendant, so a result computed on the
-// old chain can never verify against the new one. A level-0 table therefore
-// carries exactly the hash of its own block.
+// BlockHashes covers the table's block range [FirstBlock, FirstBlock+TableSize-1].
+// Any reorg that could make the table stale changes a hash in this range: the
+// entries commit to block FirstBlock-1's hash, and FirstBlock commits to that
+// same parent. A level-0 table therefore carries exactly its own block hash.
 type TableResult struct {
 	Ref         TableRef
 	EntryCount  uint64
@@ -59,8 +57,7 @@ type CanonicalChain interface {
 }
 
 // TableStore is the cache a resolver reads precomputed tables from, plus the
-// canonical inputs a rebuild needs. Unit tests back it with a map; the
-// Milestone 3 hot table store implements the same contract.
+// canonical inputs a rebuild needs.
 //
 // The contract is deliberately strict, because a rebuild must never depend on
 // data that is only good enough to produce "some" root:

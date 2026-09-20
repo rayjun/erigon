@@ -96,7 +96,6 @@ type HotTableStore struct {
 	canonical CanonicalData
 	progress  ExecutionProgress
 	listLimit uint64
-	table     string
 }
 
 var _ TableStore = (*HotTableStore)(nil)
@@ -119,7 +118,6 @@ func NewHotTableStore(tx kv.RwTx, canonical CanonicalData, progress ExecutionPro
 		canonical: canonical,
 		progress:  progress,
 		listLimit: listLimit,
-		table:     kv.Eip8304Tables,
 	}, nil
 }
 
@@ -139,7 +137,7 @@ func (s *HotTableStore) GetTable(ref TableRef) (TableResult, bool, error) {
 	if err := validateTableRef(ref); err != nil {
 		return TableResult{}, false, err
 	}
-	raw, err := s.tx.GetOne(s.table, hotStoreKey(ref))
+	raw, err := s.tx.GetOne(kv.Eip8304Tables, hotStoreKey(ref))
 	if err != nil {
 		return TableResult{}, false, fmt.Errorf("read table %+v: %w", ref, err)
 	}
@@ -178,7 +176,7 @@ func (s *HotTableStore) PutTable(result TableResult) error {
 	}
 
 	raw := encodeTableRecord(result)
-	if err := s.tx.Put(s.table, hotStoreKey(result.Ref), raw); err != nil {
+	if err := s.tx.Put(kv.Eip8304Tables, hotStoreKey(result.Ref), raw); err != nil {
 		return fmt.Errorf("write table %+v: %w", result.Ref, err)
 	}
 	return nil
@@ -188,7 +186,7 @@ func (s *HotTableStore) PutTable(result TableResult) error {
 // how many were removed. A table can only be needed while a future due table
 // can merge it, so callers pass a watermark derived from the retained range.
 func (s *HotTableStore) Prune(keepFrom uint64) (int, error) {
-	cursor, err := s.tx.RwCursor(s.table)
+	cursor, err := s.tx.RwCursor(kv.Eip8304Tables)
 	if err != nil {
 		return 0, fmt.Errorf("prune table store: %w", err)
 	}

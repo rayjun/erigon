@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/erigontech/erigon/common"
+	"github.com/erigontech/erigon/db/kv"
 )
 
 // Recovery, unwind and job protection for the hot table store.
@@ -48,7 +49,7 @@ func (s *HotTableStore) Generation() (uint64, error) {
 }
 
 func (s *HotTableStore) readGeneration() (uint64, error) {
-	raw, err := s.tx.GetOne(s.table, hotStoreMetaKey)
+	raw, err := s.tx.GetOne(kv.Eip8304Tables, hotStoreMetaKey)
 	if err != nil {
 		return 0, fmt.Errorf("read table store generation: %w", err)
 	}
@@ -64,7 +65,7 @@ func (s *HotTableStore) readGeneration() (uint64, error) {
 func (s *HotTableStore) writeGeneration(generation uint64) error {
 	var raw [8]byte
 	binary.BigEndian.PutUint64(raw[:], generation)
-	if err := s.tx.Put(s.table, hotStoreMetaKey, raw[:]); err != nil {
+	if err := s.tx.Put(kv.Eip8304Tables, hotStoreMetaKey, raw[:]); err != nil {
 		return fmt.Errorf("write table store generation: %w", err)
 	}
 	return nil
@@ -74,6 +75,11 @@ func (s *HotTableStore) writeGeneration(generation uint64) error {
 // table an unwind to that height could have invalidated, and bumps the
 // generation so in-flight jobs cannot write results back afterwards. Records
 // covering only blocks before `from` are untouched.
+//
+// `from` is the first block that no longer exists after the unwind: a caller
+// unwinding to height H (H itself surviving) passes H+1. A table is invalid as
+// soon as its range contains a removed block, which is why the test is on the
+// range's end (end >= from) and not on its start.
 func (s *HotTableStore) Invalidate(from uint64) (int, error) {
 	generation, err := s.readGeneration()
 	if err != nil {
@@ -85,7 +91,7 @@ func (s *HotTableStore) Invalidate(from uint64) (int, error) {
 		return 0, err
 	}
 
-	cursor, err := s.tx.RwCursor(s.table)
+	cursor, err := s.tx.RwCursor(kv.Eip8304Tables)
 	if err != nil {
 		return 0, fmt.Errorf("invalidate table store: %w", err)
 	}
@@ -151,7 +157,7 @@ func (r ReconcileReport) Dropped() int {
 func (s *HotTableStore) Reconcile(executed uint64) (ReconcileReport, error) {
 	var report ReconcileReport
 
-	cursor, err := s.tx.RwCursor(s.table)
+	cursor, err := s.tx.RwCursor(kv.Eip8304Tables)
 	if err != nil {
 		return report, fmt.Errorf("reconcile table store: %w", err)
 	}
@@ -208,6 +214,25 @@ func (s *HotTableStore) Reconcile(executed uint64) (ReconcileReport, error) {
 		}
 		if !equalHashes(result.BlockHashes, canonical) {
 			report.DroppedStale++
+			if err := drop(); err != nil {
+				return report, err
+			}
+			continue
+		}
+		// Self-consistency: a record whose root does not match its own entries
+		// (which a checksum alone cannot catch, because the checksum covers the
+		// written bytes and not their meaning) is unusable. The read path would
+		// reject it too, but a restart report should not call it healthy.
+		if result.EntryCount != uint64(len(result.Entries)) || !entriesSorted(result.Entries) {
+			report.DroppedDamaged++
+			if err := drop(); err != nil {
+				return report, err
+			}
+			continue
+		}
+		root, err := RootOfEntries(result.Entries, s.listLimit)
+		if err != nil || root != result.Root {
+			report.DroppedDamaged++
 			if err := drop(); err != nil {
 				return report, err
 			}

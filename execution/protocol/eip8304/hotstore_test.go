@@ -410,6 +410,78 @@ func TestHotTableStoreReconcileDropsUnusableRecords(t *testing.T) {
 	require.Equal(t, testHash(105), rebuilt.BlockHashes[0], "the rebuilt table is bound to the reorged chain")
 }
 
+// TestHotTableStoreReconcileRejectsRecordsThatDoNotMatchTheirMeaning covers the
+// check a checksum cannot make: a record can be intact on disk (valid CRC, valid
+// magic, decodable entries) and still be unusable because its root is not the
+// root its own entries produce, or because its entries are not in canonical
+// order. A restart must count such a record as damaged and drop it, so the next
+// read rebuilds instead of the report calling a broken table healthy.
+func TestHotTableStoreReconcileRejectsRecordsThatDoNotMatchTheirMeaning(t *testing.T) {
+	chain := newTestChain(t, 16)
+	ref := TableRef{FirstBlock: 0, TableSize: 4}
+
+	cases := []struct {
+		name   string
+		damage func(t *testing.T, result TableResult) TableResult
+	}{
+		{
+			"root does not match the entries",
+			func(_ *testing.T, result TableResult) TableResult {
+				// Rewrite an entry in place but keep the root the record
+				// claims, then re-encode: the CRC is recomputed and valid.
+				result.Entries[len(result.Entries)-1].Value = testHash(9999)
+				return result
+			},
+		},
+		{
+			"entries are not in canonical order",
+			func(t *testing.T, result TableResult) TableResult {
+				require.Greater(t, len(result.Entries), 1)
+				entries := make(Entries, len(result.Entries))
+				copy(entries, result.Entries)
+				first, last := entries[0], entries[len(entries)-1]
+				require.NotEqual(t, first.Encode(), last.Encode(), "the swapped entries must differ")
+				entries[0], entries[len(entries)-1] = last, first
+				result.Entries = entries
+				// Keep the record self-consistent so only the order check can
+				// reject it.
+				root, err := RootOfEntries(entries, hotStoreTestLimit)
+				require.NoError(t, err)
+				result.Root = root
+				return result
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newHotStoreDB(t)
+			tx := beginHotStoreTx(t, db)
+			defer tx.Rollback()
+			store := newTestHotStore(t, tx, chain, 15)
+
+			// The tampered record is written directly, bypassing PutTable, so
+			// it lands in the store exactly as a broken writer would leave it.
+			require.NoError(t, tx.Put(kv.Eip8304Tables, hotStoreKey(ref), encodeTableRecord(tc.damage(t, hotStoreSeed(t, chain, ref)))))
+
+			report, err := store.Reconcile(15)
+			require.NoError(t, err)
+			require.Equal(t, 1, report.Checked)
+			require.Equal(t, 0, report.Kept)
+			require.Equal(t, 1, report.DroppedDamaged, "an unusable record must be reported, not kept")
+			require.False(t, report.HasRecords)
+
+			_, ok, err := store.GetTable(ref)
+			require.NoError(t, err)
+			require.False(t, ok, "the dropped record must not be served after the restart")
+
+			rebuilt, err := NewResolver(store, hotStoreTestLimit).Table(ref)
+			require.NoError(t, err)
+			require.Equal(t, oracleRoot(t, chain, ref, hotStoreTestLimit), rebuilt.Root, "the dropped record is rebuilt from canonical data")
+		})
+	}
+}
+
 // TestHotTableStoreJobGuardCoversStaleAndInvalidatedJobs covers delayed or
 // background merges: a result may only be written back while the chain view it
 // was computed against still holds.

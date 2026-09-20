@@ -56,8 +56,7 @@ type CanonicalChain interface {
 	CanonicalHash(block uint64) (common.Hash, error)
 }
 
-// TableStore is the cache a resolver reads precomputed tables from, plus the
-// canonical inputs a rebuild needs.
+// CanonicalData is the canonical chain data a deterministic rebuild needs.
 //
 // The contract is deliberately strict, because a rebuild must never depend on
 // data that is only good enough to produce "some" root:
@@ -66,15 +65,27 @@ type CanonicalChain interface {
 //     block's data is unavailable. Missing data must be reported, never
 //     replaced by an empty table. CanonicalChain follows the same rule for a
 //     height it cannot resolve.
-//   - GetTable reports ok=false only for a genuine cache miss. A corrupt or
-//     stale row is returned so the resolver can reject and rebuild it.
-//   - PutTable records a table as canonical. The finalize path calls it only
-//     after the table's system call succeeded, never before.
-type TableStore interface {
+type CanonicalData interface {
 	CanonicalChain
 	BlockEntries(block uint64) (Entries, error)
-	GetTable(ref TableRef) (TableResult, bool)
-	PutTable(result TableResult)
+}
+
+// TableStore is the cache a resolver reads precomputed tables from, plus the
+// canonical inputs a rebuild needs.
+//
+// Records are keyed by the table reference and bound to the canonical chain:
+//   - GetTable reports ok=false only for a genuine cache miss. A row that
+//     exists but cannot be trusted — undecodable, partially written, written by
+//     an unknown record version, or covering blocks this node has not executed
+//     — returns an error so the resolver rejects and rebuilds it instead of
+//     using it. Rejection never aborts the block.
+//   - PutTable records a table as canonical, atomically or not at all. The
+//     finalize path calls it only after the table's system call succeeded,
+//     never before, and treats an error as aborting the block.
+type TableStore interface {
+	CanonicalData
+	GetTable(ref TableRef) (TableResult, bool, error)
+	PutTable(result TableResult) error
 }
 
 // RootOfEntries computes the SSZ root of the table formed by `entries`, which
@@ -198,7 +209,14 @@ func (r *Resolver) Table(ref TableRef) (TableResult, error) {
 		return TableResult{}, err
 	}
 
-	if stored, ok := r.store.GetTable(ref); ok {
+	stored, ok, err := r.store.GetTable(ref)
+	switch {
+	case err != nil:
+		// A row that cannot be read back is a rejected result, not a failure of
+		// the block: the rebuild below produces the canonical answer instead.
+		r.rejected++
+		r.lastReject = err
+	case ok:
 		if err := VerifyTable(stored, ref, r.store, r.listLimit); err == nil {
 			r.hits++
 			return stored, nil

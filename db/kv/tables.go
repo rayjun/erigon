@@ -265,6 +265,10 @@ const (
 	PendingConsolidations         = "PendingConsolidations"         // slot => queue_diffs
 	// End Electra
 
+	// EIP-8304 hot table store: (first_block, table_size) -> a versioned table
+	// record bound to the canonical block hashes of the range it covers.
+	Eip8304Tables = "Eip8304Tables"
+
 	// GLOAS (EIP-7732)
 	BuildersDump                      = "BuildersDump"                   // slot => dump
 	Builders                          = "Builders"                       // slot => queue_diffs
@@ -447,6 +451,8 @@ var ChaindataTables = []string{
 	ActiveValidatorIndicies,
 	EffectiveBalancesDump,
 	BalancesDump,
+	// EIP-8304 hot table store
+	Eip8304Tables,
 	// GLOAS (EIP-7732)
 	BuildersDump,
 	Builders,

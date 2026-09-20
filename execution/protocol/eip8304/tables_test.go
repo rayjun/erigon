@@ -88,14 +88,15 @@ func (s *chainStore) BlockEntries(block uint64) (Entries, error) {
 	return append(Entries(nil), entries...), nil
 }
 
-func (s *chainStore) GetTable(ref TableRef) (TableResult, bool) {
+func (s *chainStore) GetTable(ref TableRef) (TableResult, bool, error) {
 	result, ok := s.cached[ref]
-	return result, ok
+	return result, ok, nil
 }
 
-func (s *chainStore) PutTable(result TableResult) {
+func (s *chainStore) PutTable(result TableResult) error {
 	s.cached[result.Ref] = result
 	s.puts = append(s.puts, result.Ref)
+	return nil
 }
 
 func (s *chainStore) parentHash(block uint64) common.Hash {
@@ -179,7 +180,8 @@ func TestResolverRebuildsOnCacheMiss(t *testing.T) {
 	require.Equal(t, 0, stats.Hits)
 	require.Equal(t, 5, stats.Rebuilds)
 
-	_, recorded := store.GetTable(ref)
+	_, recorded, err := store.GetTable(ref)
+	require.NoError(t, err)
 	require.False(t, recorded, "resolving a table must not persist it")
 	require.Empty(t, store.puts)
 }
@@ -193,7 +195,7 @@ func TestResolverUsesVerifiedPrecomputedResult(t *testing.T) {
 
 	precomputed, err := NewResolver(store, limit).Table(ref)
 	require.NoError(t, err)
-	store.PutTable(precomputed)
+	require.NoError(t, store.PutTable(precomputed))
 
 	resolver := NewResolver(store, limit)
 	got, err := resolver.Table(ref)
@@ -222,7 +224,7 @@ func TestResolverReusesVerifiedChildrenDuringNestedRebuild(t *testing.T) {
 		for _, child := range children {
 			childResult, err := resolver.Table(child)
 			require.NoError(t, err)
-			store.PutTable(childResult)
+			require.NoError(t, store.PutTable(childResult))
 		}
 		return children
 	}
@@ -504,7 +506,8 @@ func TestApplyDueTablesGenesisEmptyTable(t *testing.T) {
 	require.Equal(t, L0(0), got[0])
 	require.Equal(t, emptyRoot, roots[0], "genesis with no transactions is an empty level-0 table")
 
-	genesis, ok := store.GetTable(L0(0))
+	genesis, ok, err := store.GetTable(L0(0))
+	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, uint64(0), genesis.EntryCount)
 	require.Empty(t, genesis.Entries)
@@ -588,7 +591,8 @@ func TestApplyDueTablesDoesNotRecordFailedTable(t *testing.T) {
 	require.ErrorIs(t, err, boom)
 	require.Equal(t, []TableRef{L0(4)}, applied, "only the L0 write succeeded before the failure")
 
-	_, recorded := store.GetTable(TableRef{FirstBlock: 0, TableSize: 4})
+	_, recorded, err := store.GetTable(TableRef{FirstBlock: 0, TableSize: 4})
+	require.NoError(t, err)
 	require.False(t, recorded, "a table whose system call failed must not be marked canonical")
 	require.Equal(t, []TableRef{L0(0), L0(1), L0(2), L0(3), L0(4)}, store.puts)
 }

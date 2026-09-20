@@ -86,3 +86,67 @@ func TestEncodedEntryLeafHashUsesSHA256(t *testing.T) {
 		entry.Encode().LeafHash().String(),
 	)
 }
+
+// Decoding exists so a stored table can be read back exactly; the tests below
+// pin it as the inverse of encoding for every entry type, and pin the failures
+// a damaged record must produce.
+func TestDecodeEntryIsTheInverseOfEncode(t *testing.T) {
+	topic := func(position uint8, hash common.Hash) Entry {
+		entry, err := NewLogTopicEntry(7, 1, 2, position, hash)
+		require.NoError(t, err)
+		return entry
+	}
+	entries := Entries{
+		NewBlockEntry(7, common.HexToHash("0xaa")),
+		NewTransactionEntry(7, 1, 2, common.HexToHash("0xbb")),
+		NewLogAddressEntry(7, 1, 2, common.HexToAddress("0xdeadbeef")),
+		topic(0, common.HexToHash("0x01")),
+		topic(1, common.HexToHash("0x02")),
+		topic(2, common.HexToHash("0x03")),
+		topic(3, common.HexToHash("0x04")),
+	}
+
+	for _, want := range entries {
+		encoded := want.Encode()
+		got, size, err := DecodeEntry(encoded)
+		require.NoError(t, err)
+		require.Equal(t, len(encoded), size)
+		require.Equal(t, want, got, "decode must return the entry encode produced (%s)", encoded.String())
+	}
+
+	// Decoding a run consumes exactly the bytes the run occupies.
+	var all []byte
+	for _, entry := range entries {
+		all = append(all, entry.Encode()...)
+	}
+	got, consumed, err := DecodeEntries(all, uint64(len(entries)))
+	require.NoError(t, err)
+	require.Equal(t, len(all), consumed)
+	require.Equal(t, entries, got)
+}
+
+func TestDecodeEntryRejectsMalformedInput(t *testing.T) {
+	// An unknown tag can never be part of a table.
+	unknown := []byte{0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0}
+	_, _, err := DecodeEntry(unknown)
+	require.ErrorIs(t, err, ErrUnknownEntryType)
+
+	block := NewBlockEntry(42, testHash(1)).Encode()
+	transaction := NewTransactionEntry(42, 0, 0, testHash(2)).Encode()
+	address := NewLogAddressEntry(42, 0, 0, common.HexToAddress("0xdead")).Encode()
+	for _, encoded := range [][]byte{block, transaction, address} {
+		for cut := 0; cut < len(encoded); cut++ {
+			_, _, err := DecodeEntry(encoded[:cut])
+			require.ErrorIs(t, err, ErrShortEncodedEntry, "a %d byte prefix must not decode", cut)
+		}
+	}
+
+	// A run that claims more entries than it holds fails at the missing entry.
+	_, _, err = DecodeEntries(block, 2)
+	require.ErrorIs(t, err, ErrShortEncodedEntry)
+	// Decoding fewer entries than the run holds leaves the remainder visible to
+	// the caller, which is what makes trailing bytes detectable.
+	_, consumed, err := DecodeEntries(append(append([]byte{}, block...), transaction...), 1)
+	require.NoError(t, err)
+	require.Equal(t, len(block), consumed)
+}

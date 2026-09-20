@@ -5,10 +5,18 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"slices"
 
 	"github.com/erigontech/erigon/common"
+)
+
+// Decoding errors. A stored table record is rejected, never partially
+// trusted, when its entries cannot be decoded exactly.
+var (
+	ErrUnknownEntryType  = errors.New("eip8304: unknown entry type")
+	ErrShortEncodedEntry = errors.New("eip8304: truncated entry encoding")
 )
 
 const (
@@ -104,6 +112,69 @@ func (e Entry) Encode() EncodedEntry {
 	binary.BigEndian.PutUint32(encoded[2+e.valueSize+8:], e.transaction)
 	binary.BigEndian.PutUint32(encoded[2+e.valueSize+12:], e.position)
 	return encoded
+}
+
+// entryValueSize returns the value width the canonical encoding gives a type,
+// which is what makes an encoded entry self-describing: its type fixes its
+// length, so a decoder never has to guess a record's layout.
+func entryValueSize(t EntryType) (int, bool) {
+	switch t {
+	case EntryBlock, EntryTransaction, EntryLogTopic0, EntryLogTopic1, EntryLogTopic2, EntryLogTopic3:
+		return hashLength, true
+	case EntryLogAddress:
+		return addressLength, true
+	default:
+		return 0, false
+	}
+}
+
+// DecodeEntry decodes one canonically encoded entry and reports how many bytes
+// it consumed. It is the inverse of Entry.Encode; anything that does not decode
+// exactly (unknown type, truncated input) is an error, so a store can reject a
+// partial or corrupt record instead of trusting it.
+func DecodeEntry(encoded []byte) (Entry, int, error) {
+	if len(encoded) < 2 {
+		return Entry{}, 0, fmt.Errorf("%w: %d bytes for entry type", ErrShortEncodedEntry, len(encoded))
+	}
+	t := EntryType(binary.BigEndian.Uint16(encoded))
+	valueSize, ok := entryValueSize(t)
+	if !ok {
+		return Entry{}, 0, fmt.Errorf("%w: %d", ErrUnknownEntryType, t)
+	}
+	size := 2 + valueSize + 8
+	if t != EntryBlock {
+		size += 8
+	}
+	if len(encoded) < size {
+		return Entry{}, 0, fmt.Errorf("%w: %d bytes for a %d byte entry", ErrShortEncodedEntry, len(encoded), size)
+	}
+
+	e := Entry{Type: t, valueSize: uint8(valueSize)}
+	copy(e.Value[hashLength-valueSize:], encoded[2:2+valueSize])
+	e.block = binary.BigEndian.Uint64(encoded[2+valueSize:])
+	if t != EntryBlock {
+		e.transaction = binary.BigEndian.Uint32(encoded[2+valueSize+8:])
+		e.position = binary.BigEndian.Uint32(encoded[2+valueSize+12:])
+	}
+	return e, size, nil
+}
+
+// DecodeEntries decodes exactly `count` consecutive entries and reports the
+// number of bytes they occupy. It fails if the input runs out early or holds
+// more than count entries, so a caller can require that a record is consumed
+// to the byte.
+func DecodeEntries(encoded []byte, count uint64) (Entries, int, error) {
+	entries := make(Entries, 0, count)
+	offset := 0
+	for i := uint64(0); i < count; i++ {
+		entry, size, err := DecodeEntry(encoded[offset:])
+		if err != nil {
+			return nil, 0, fmt.Errorf("entry %d of %d: %w", i, count, err)
+		}
+		entries = append(entries, entry)
+		offset += size
+	}
+	return entries, offset, nil
 }
 
 type Entries []Entry

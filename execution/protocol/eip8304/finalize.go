@@ -92,7 +92,9 @@ func ApplyDueTables(
 		if err := misc.ApplyIndexEip8304(indexAddr, ref.FirstBlock, ref.TableSize, result.Root, syscall); err != nil {
 			return applied, err
 		}
-		resolver.store.PutTable(result)
+		if err := resolver.store.PutTable(result); err != nil {
+			return applied, fmt.Errorf("record table %+v: %w", ref, err)
+		}
 		applied = append(applied, ref)
 	}
 	return applied, nil

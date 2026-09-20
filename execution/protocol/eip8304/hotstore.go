@@ -199,6 +199,9 @@ func (s *HotTableStore) Prune(keepFrom uint64) (int, error) {
 		if err != nil {
 			return pruned, fmt.Errorf("prune table store: %w", err)
 		}
+		if isHotStoreMetaKey(k) {
+			continue
+		}
 		ref, err := decodeHotStoreKey(k)
 		if err != nil {
 			// An unreadable key is a damaged record: drop it so it cannot be

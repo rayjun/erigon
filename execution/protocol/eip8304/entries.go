@@ -22,6 +22,10 @@ var (
 const (
 	hashLength    = 32
 	addressLength = 20
+
+	// minEncodedEntrySize is the shortest entry the canonical encoding can
+	// produce (an address log entry): type, value, block, transaction, position.
+	minEncodedEntrySize = 2 + addressLength + 8 + 8
 )
 
 type EntryType uint16
@@ -160,10 +164,17 @@ func DecodeEntry(encoded []byte) (Entry, int, error) {
 }
 
 // DecodeEntries decodes exactly `count` consecutive entries and reports the
-// number of bytes they occupy. It fails if the input runs out early or holds
-// more than count entries, so a caller can require that a record is consumed
-// to the byte.
+// number of bytes they occupy. It fails if the input runs out early. Bytes left
+// over are not an error here: the returned size is what a caller compares
+// against its input when it needs the run consumed to the byte.
+//
+// `count` comes from a stored record, so it is bounded by the input before
+// anything is allocated: a count larger than the input could hold is rejected
+// rather than trusted as an allocation size.
 func DecodeEntries(encoded []byte, count uint64) (Entries, int, error) {
+	if count > uint64(len(encoded))/minEncodedEntrySize {
+		return nil, 0, fmt.Errorf("%w: %d entries do not fit in %d bytes", ErrShortEncodedEntry, count, len(encoded))
+	}
 	entries := make(Entries, 0, count)
 	offset := 0
 	for i := uint64(0); i < count; i++ {

@@ -12,15 +12,13 @@ import (
 
 // Local development network support.
 //
-// EIP-8304 is not scheduled on any shipped network, so the only way to exercise
-// it end to end is a local chain that activates the fork from genesis and
-// predeploys an index contract. `--chain dev --dev.eip8304` does exactly that:
-// it sets Eip8304Time=0 on the development genesis and allocates the mock
-// contract below, so the index updates the finalize path issues can be read
-// back over RPC (eth_getStorageAt) and compared against an independently
-// computed root. None of this is consensus code: shipped networks never set
-// Eip8304Time, and the mock stands in for the real contract whose address and
-// deployment flow are still <TBD> (see docs/eip8304/open-questions.md).
+// EIP-8304 is not scheduled on any shipped network, so exercising it end to end
+// needs a chain that activates the fork from genesis and predeploys an index
+// contract; `--dev.eip8304` is that switch. The mock contract below stands in
+// for the real one, whose address and deployment flow are still undecided, and
+// reading its storage back over RPC is how a devnet run is checked against an
+// independently computed root. None of this is consensus code: shipped networks
+// never set Eip8304Time (see docs/eip8304/open-questions.md).
 
 // DevnetIndexContractAddress is the address the mock index contract is
 // predeployed at on the local development network.

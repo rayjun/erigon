@@ -10,26 +10,13 @@ import (
 	"github.com/erigontech/erigon/db/kv"
 )
 
-// The hot table store persists computed tables in their own database bucket so
+// The hot table store persists computed tables in the kv.Eip8304Tables bucket so
 // a node can reuse them after a restart without re-deriving them from receipts.
 //
-// Design notes that the record layout encodes:
-//
-//   - A record is identified by more than its (first_block, table_size): the
-//     value carries the canonical block hashes of the covered range, so a
-//     record from another chain (or from before a reorg) is rejected by
-//     VerifyTable rather than reused.
-//   - Reads validate both halves of "canonical": the record's covered range
-//     must be below the node's executed height, and the record's hashes must
-//     still be the canonical ones.
-//   - Commit is atomic (one Put), and a partially written or truncated record
-//     is detectable: a magic, a record version, a completeness flag and a CRC32
-//     over the whole value. Damaged records are rejected and rebuilt; they are
-//     never partially trusted.
-//   - Retention is by covered range, not by arrival order: Prune drops records
-//     whose range ends below the caller's watermark. Records never store
-//     receipts; entries are the only canonical payload, and a record's size is
-//     bounded by the SSZ list limit it was written with.
+// Two properties are not visible in the layout on their own: a record's identity
+// is its ref *and* the canonical hashes of its covered range, and only a complete
+// record is ever written, so a torn write can only ever read back as damage.
+// Record layout and rationale: docs/eip8304/hot-table-store.md.
 
 // Hot store record layout constants.
 const (
@@ -144,7 +131,7 @@ func (s *HotTableStore) GetTable(ref TableRef) (TableResult, bool, error) {
 	if raw == nil {
 		return TableResult{}, false, nil
 	}
-	result, err := decodeTableRecord(ref, raw)
+	result, err := decodeTableRecord(ref, raw, s.listLimit)
 	if err != nil {
 		return TableResult{}, false, err
 	}
@@ -269,7 +256,14 @@ func encodeTableRecord(result TableResult) []byte {
 
 // decodeTableRecord is the inverse of encodeTableRecord. Every rejection names
 // what was wrong with the record so a corrupt store is diagnosable.
-func decodeTableRecord(ref TableRef, raw []byte) (TableResult, error) {
+//
+// Everything the record says about its own size is checked against the limit
+// before it is used to allocate: a record is read from a bucket this node wrote,
+// but a damaged one must be rejected, not trusted into a huge allocation.
+func decodeTableRecord(ref TableRef, raw []byte, limit uint64) (TableResult, error) {
+	if err := validateTableRef(ref); err != nil {
+		return TableResult{}, err
+	}
 	if len(raw) < hotStoreHeader+hotStoreTrailer {
 		return TableResult{}, fmt.Errorf("%w: record is %d bytes", ErrTableRecordCorrupt, len(raw))
 	}
@@ -287,6 +281,9 @@ func decodeTableRecord(ref TableRef, raw []byte) (TableResult, error) {
 	}
 
 	entryCount := binary.BigEndian.Uint64(raw[hotStoreEntryCountOffset : hotStoreEntryCountOffset+8])
+	if entryCount > limit {
+		return TableResult{}, fmt.Errorf("%w: entry_count %d, limit %d", ErrTableRecordTooLarge, entryCount, limit)
+	}
 	root := common.BytesToHash(raw[hotStoreRootOffset : hotStoreRootOffset+hashLength])
 	hashCount := binary.BigEndian.Uint64(raw[hotStoreHashCountOffset:hotStoreHeader])
 	if hashCount != ref.TableSize {

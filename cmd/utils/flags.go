@@ -2204,9 +2204,8 @@ func setDevnetEthConfig(ctx *cli.Command, cfg *ethconfig.Config, logger log.Logg
 
 	cfg.Genesis = chainspec.DeveloperGenesisBlock()
 	// Optional EIP-8304 devnet: activate the experimental fork from genesis and
-	// predeploy the mock index contract, so the index updates the finalize path
-	// issues can be observed over RPC. Without this flag the development chain is
-	// unchanged.
+	// predeploy the mock index contract. Without this flag the development chain
+	// is unchanged.
 	if ctx.Bool(DevEip8304Flag.Name) {
 		if err := eip8304.EnableDevnet(cfg.Genesis, eip8304.DevnetIndexContractAddress); err != nil {
 			Fatalf("Failed to enable the EIP-8304 devnet: %v", err)

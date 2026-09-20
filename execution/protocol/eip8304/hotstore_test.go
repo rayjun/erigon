@@ -2,6 +2,8 @@ package eip8304
 
 import (
 	"context"
+	"encoding/binary"
+	"hash/crc32"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -128,6 +130,20 @@ func TestHotTableStoreRejectsDamagedRecords(t *testing.T) {
 			return raw
 		}, ErrTableRecordCorrupt},
 		{"all zeroes", func(_ *testing.T, raw []byte) []byte { return make([]byte, len(raw)) }, ErrTableRecordCorrupt},
+		{"entry count beyond the list limit", func(_ *testing.T, raw []byte) []byte {
+			// A record can be checksum-valid and still claim far more entries
+			// than the limit allows; that count is never trusted into an
+			// allocation.
+			binary.BigEndian.PutUint64(raw[hotStoreEntryCountOffset:], 1<<40)
+			return resealHotStoreRecord(raw)
+		}, ErrTableRecordTooLarge},
+		{"entry count larger than the payload", func(_ *testing.T, raw []byte) []byte {
+			// The count stays inside the limit, so only the payload itself can
+			// contradict it.
+			count := binary.BigEndian.Uint64(raw[hotStoreEntryCountOffset : hotStoreEntryCountOffset+8])
+			binary.BigEndian.PutUint64(raw[hotStoreEntryCountOffset:], count+1)
+			return resealHotStoreRecord(raw)
+		}, ErrTableRecordCorrupt},
 	}
 
 	for _, tc := range damages {
@@ -147,6 +163,51 @@ func TestHotTableStoreRejectsDamagedRecords(t *testing.T) {
 			require.False(t, ok)
 		})
 	}
+}
+
+// resealHotStoreRecord recomputes the CRC32 trailer after a test tampered with
+// a record's payload, so the record stays checksum-valid and only the checks
+// under test can reject it.
+func resealHotStoreRecord(raw []byte) []byte {
+	binary.BigEndian.PutUint32(raw[len(raw)-hotStoreTrailer:], crc32.ChecksumIEEE(raw[:len(raw)-hotStoreTrailer]))
+	return raw
+}
+
+// TestHotTableStorePruneKeepsTheGeneration covers the retention half of the
+// recovery contract: Prune must skip the reserved meta key. If it deleted it,
+// the generation would fall back to 0 and a job started before the prune could
+// write a stale result back, which no other test would catch.
+func TestHotTableStorePruneKeepsTheGeneration(t *testing.T) {
+	db := newHotStoreDB(t)
+	chain := newTestChain(t, 16)
+	tx := beginHotStoreTx(t, db)
+	defer tx.Rollback()
+	store := newTestHotStore(t, tx, chain, 15)
+
+	ref := L0(0)
+	require.NoError(t, store.PutTable(hotStoreSeed(t, chain, ref)))
+	job, err := store.BeginJob(ref)
+	require.NoError(t, err)
+
+	_, err = store.Invalidate(1)
+	require.NoError(t, err)
+
+	pruned, err := store.Prune(4)
+	require.NoError(t, err)
+	require.Equal(t, 1, pruned, "the (0,1) record is below the watermark")
+
+	raw, err := tx.GetOne(kv.Eip8304Tables, hotStoreMetaKey)
+	require.NoError(t, err)
+	require.NotNil(t, raw, "pruning must not delete the reserved generation key")
+	generation, err := store.Generation()
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), generation, "the generation must survive the prune")
+
+	require.ErrorIs(t, store.CommitJob(job, hotStoreSeed(t, chain, ref)), ErrStaleTableJob,
+		"a job started before the prune must not commit after it")
+	_, ok, err := store.GetTable(ref)
+	require.NoError(t, err)
+	require.False(t, ok, "the pruned record is gone and is rebuilt on the next read")
 }
 
 func TestHotTableStoreRejectsRecordsAboveExecutedHeight(t *testing.T) {

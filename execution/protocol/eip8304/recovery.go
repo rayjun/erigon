@@ -12,30 +12,24 @@ import (
 // Recovery, unwind and job protection for the hot table store.
 //
 // Three situations can leave a stored table unusable, and each has an explicit
-// answer here rather than an implicit one:
-//
-//   - A reorg unwound part of the chain: every table whose covered range reaches
-//     the unwind point is invalid and is dropped (Invalidate), so nothing can
-//     serve an old-chain table.
-//   - The node restarted: stored records are checked against the executed height
-//     and the canonical chain (Reconcile); whatever does not check out is
-//     dropped, which the resolver then rebuilds deterministically. Reconcile
-//     never rewrites or repairs a record in place.
-//   - A table is computed away from the block it belongs to (a delayed or
-//     background merge): the caller takes a TableJob before computing and
-//     commits through it, so a result computed against an unwound or reorged
-//     chain is rejected instead of written back.
+// answer rather than an implicit one: a reorg (Invalidate), a restart
+// (Reconcile) and a table computed away from the block it belongs to (TableJob).
+// All three drop the record and let the next read rebuild it; none repairs a
+// record in place.
 //
 // The generation counter is the cheap gate for the third case: Invalidate bumps
 // it, so any job started earlier fails immediately. It is a gate, not the
 // semantics: the job also has to verify against the canonical chain, which is
-// what actually decides whether a result is still valid.
+// what actually decides whether a result is still valid. Details:
+// docs/eip8304/hot-table-store.md.
 
 // ErrStaleTableJob reports a job whose chain view changed before it committed.
 var ErrStaleTableJob = errors.New("eip8304: table job is stale")
 
-// hotStoreMetaKey is the reserved key (record version 0, which no table can
-// take) under which the store keeps its generation counter.
+// hotStoreMetaKey is the reserved 1-byte key under which the store keeps its
+// generation counter. It is not a table key — those are 17 bytes and start with
+// the record version — so isHotStoreMetaKey is what Prune, Invalidate and
+// Reconcile use to leave it alone.
 var hotStoreMetaKey = []byte{0x00}
 
 func isHotStoreMetaKey(key []byte) bool {
@@ -187,7 +181,7 @@ func (s *HotTableStore) Reconcile(executed uint64) (ReconcileReport, error) {
 			}
 			continue
 		}
-		result, err := decodeTableRecord(ref, v)
+		result, err := decodeTableRecord(ref, v, s.listLimit)
 		if err != nil {
 			report.DroppedDamaged++
 			if err := drop(); err != nil {

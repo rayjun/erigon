@@ -59,6 +59,7 @@ import (
 	"github.com/erigontech/erigon/execution/builder/buildercfg"
 	"github.com/erigontech/erigon/execution/chain/networkname"
 	chainspec "github.com/erigontech/erigon/execution/chain/spec"
+	"github.com/erigontech/erigon/execution/protocol/eip8304"
 	"github.com/erigontech/erigon/execution/protocol/params"
 	"github.com/erigontech/erigon/execution/protocol/rules/ethash/ethashcfg"
 	"github.com/erigontech/erigon/execution/state/genesiswrite"
@@ -120,6 +121,10 @@ var (
 		Name:  "dev.slot-time",
 		Usage: "Slot duration in seconds for PoS dev mode (minimum: 2)",
 		Value: 6,
+	}
+	DevEip8304Flag = cli.BoolFlag{
+		Name:  "dev.eip8304",
+		Usage: "Activate the experimental EIP-8304 index fork from genesis in PoS dev mode and predeploy the mock index contract",
 	}
 	ChainFlag = cli.StringFlag{
 		Name:  "chain",
@@ -2198,6 +2203,19 @@ func setDevnetEthConfig(ctx *cli.Command, cfg *ethconfig.Config, logger log.Logg
 	)
 
 	cfg.Genesis = chainspec.DeveloperGenesisBlock()
+	// Optional EIP-8304 devnet: activate the experimental fork from genesis and
+	// predeploy the mock index contract, so the index updates the finalize path
+	// issues can be observed over RPC. Without this flag the development chain is
+	// unchanged.
+	if ctx.Bool(DevEip8304Flag.Name) {
+		if err := eip8304.EnableDevnet(cfg.Genesis, eip8304.DevnetIndexContractAddress); err != nil {
+			Fatalf("Failed to enable the EIP-8304 devnet: %v", err)
+		}
+		logger.Info("EIP-8304 devnet enabled",
+			"index_contract", eip8304.DevnetIndexContractAddress.String(),
+			"eip8304_time", 0,
+		)
+	}
 	// Ensure the derived signer address is pre-funded.
 	if _, ok := cfg.Genesis.Alloc[signerAddr]; !ok {
 		cfg.Genesis.Alloc[signerAddr] = types.GenesisAccount{

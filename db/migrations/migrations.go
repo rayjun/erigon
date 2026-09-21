@@ -57,6 +57,7 @@ var migrations = map[kv.Label][]Migration{
 		ResetStageTxnLookup,
 		dbSchemaVersion6,
 		dbSchemaVersion7,
+		dbSchemaVersion8,
 		dropLegacyE2Tables,
 	},
 	dbcfg.TxPoolDB: {},

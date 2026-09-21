@@ -213,19 +213,12 @@ func (s *HotTableStore) Reconcile(executed uint64) (ReconcileReport, error) {
 			}
 			continue
 		}
-		// Self-consistency: a record whose root does not match its own entries
-		// (which a checksum alone cannot catch, because the checksum covers the
-		// written bytes and not their meaning) is unusable. The read path would
-		// reject it too, but a restart report should not call it healthy.
-		if result.EntryCount != uint64(len(result.Entries)) || !entriesSorted(result.Entries) {
-			report.DroppedDamaged++
-			if err := drop(); err != nil {
-				return report, err
-			}
-			continue
-		}
-		root, err := RootOfEntries(result.Entries, s.listLimit)
-		if err != nil || root != result.Root {
+		// Self-consistency: a record that disagrees with itself (which a
+		// checksum alone cannot catch, because the checksum covers the written
+		// bytes and not their meaning) is unusable. The read path rejects it
+		// too, through the same check, but a restart report should not call it
+		// healthy.
+		if err := checkResultShape(result, ref, s.listLimit); err != nil {
 			report.DroppedDamaged++
 			if err := drop(); err != nil {
 				return report, err

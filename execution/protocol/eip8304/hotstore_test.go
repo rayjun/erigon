@@ -165,6 +165,76 @@ func TestHotTableStoreRejectsDamagedRecords(t *testing.T) {
 	}
 }
 
+// TestResolverRejectsRecordWhoseEntriesBelongToAnotherBlock covers the range
+// bind of the entries. A record can agree with itself — its checksum is valid,
+// its root is the root of its entries, its covered hashes match the ones the
+// key names — and still describe different blocks. Verification must reject it:
+// serving it would publish a root that is not this table's root.
+func TestResolverRejectsRecordWhoseEntriesBelongToAnotherBlock(t *testing.T) {
+	db := newHotStoreDB(t)
+	chain := newTestChain(t, 8)
+	tx := beginHotStoreTx(t, db)
+	defer tx.Rollback()
+	store := newTestHotStore(t, tx, chain, 7)
+
+	target := L0(4)
+	wrong := hotStoreSeed(t, chain, L0(2)) // block 2's entries
+	wrong.Ref = target
+	wrong.BlockHashes = []common.Hash{chain.hashes[4]}
+	root, err := RootOfEntries(wrong.Entries, hotStoreTestLimit)
+	require.NoError(t, err)
+	wrong.Root = root
+	oracle := oracleRoot(t, chain, target, hotStoreTestLimit)
+	require.NotEqual(t, oracle, wrong.Root, "the wrong record must not happen to carry the right root")
+
+	// Written straight into the bucket: this is what a writer bug or a tampered
+	// disk would leave behind, and it passes every checksum.
+	require.NoError(t, tx.Put(kv.Eip8304Tables, hotStoreKey(target), encodeTableRecord(wrong)))
+
+	resolver := NewResolver(store, hotStoreTestLimit)
+	got, err := resolver.Table(target)
+	require.NoError(t, err)
+	require.Equal(t, oracle, got.Root, "another block's entries must not become this block's root")
+	require.Equal(t, 0, resolver.Stats().Hits)
+	require.Equal(t, 1, resolver.Stats().Rejected)
+	require.ErrorIs(t, resolver.Stats().LastReject, ErrTableCoverageMismatch)
+
+	// A writer that hands the store such a result fails the block instead of
+	// leaving a record the read path would have to catch.
+	require.ErrorIs(t, store.PutTable(wrong), ErrTableCoverageMismatch)
+}
+
+// TestHotTableStorePruneDropsKeysThatNameImpossibleTables covers the retention
+// corner of the damaged-record rule: a key whose table_size is not a protocol
+// size can never match a real table, and its covered range is meaningless, so
+// it has to be dropped like any other damaged record instead of surviving every
+// prune because its range looks enormous.
+func TestHotTableStorePruneDropsKeysThatNameImpossibleTables(t *testing.T) {
+	db := newHotStoreDB(t)
+	chain := newTestChain(t, 16)
+	tx := beginHotStoreTx(t, db)
+	defer tx.Rollback()
+	store := newTestHotStore(t, tx, chain, 15)
+
+	good := L0(0)
+	require.NoError(t, store.PutTable(hotStoreSeed(t, chain, good)))
+
+	// A key this node would never write: 17 bytes, correct version, impossible
+	// table_size.
+	impossible := TableRef{FirstBlock: 0, TableSize: 1 << 40}
+	require.NoError(t, tx.Put(kv.Eip8304Tables, hotStoreKey(impossible), []byte("not a record")))
+
+	// A watermark of 0 cannot reach a real record's range end, so only the
+	// impossible key is dropped.
+	pruned, err := store.Prune(0)
+	require.NoError(t, err)
+	require.Equal(t, 1, pruned, "the impossible key is damaged, not an old table")
+
+	_, ok, err := store.GetTable(good)
+	require.NoError(t, err)
+	require.True(t, ok, "a real record below the watermark must survive")
+}
+
 // resealHotStoreRecord recomputes the CRC32 trailer after a test tampered with
 // a record's payload, so the record stays checksum-valid and only the checks
 // under test can reject it.
@@ -491,6 +561,20 @@ func TestHotTableStoreReconcileRejectsRecordsThatDoNotMatchTheirMeaning(t *testi
 				// Rewrite an entry in place but keep the root the record
 				// claims, then re-encode: the CRC is recomputed and valid.
 				result.Entries[len(result.Entries)-1].Value = testHash(9999)
+				return result
+			},
+		},
+		{
+			"entries from another block range",
+			func(t *testing.T, result TableResult) TableResult {
+				// Self-consistent: the root below matches these entries, so
+				// only the range bind can reject the record.
+				other := hotStoreSeed(t, chain, L0(5))
+				result.Entries = other.Entries
+				result.EntryCount = other.EntryCount
+				root, err := RootOfEntries(result.Entries, hotStoreTestLimit)
+				require.NoError(t, err)
+				result.Root = root
 				return result
 			},
 		},

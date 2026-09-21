@@ -148,6 +148,10 @@ func (s *HotTableStore) GetTable(ref TableRef) (TableResult, bool, error) {
 // PutTable encodes result and writes it as one value, so a record is either
 // fully visible or absent. The caller must have applied the table's system call
 // already; an error means nothing was recorded and the block must be aborted.
+//
+// A result whose entries do not belong to result.Ref's block range is rejected
+// rather than stored: it would be served back as this table's root, and a
+// checksum cannot tell it apart from a correct record.
 func (s *HotTableStore) PutTable(result TableResult) error {
 	if err := validateTableRef(result.Ref); err != nil {
 		return err
@@ -160,6 +164,12 @@ func (s *HotTableStore) PutTable(result TableResult) error {
 	}
 	if uint64(len(result.BlockHashes)) != result.Ref.TableSize {
 		return fmt.Errorf("%w: %d hashes for table_size %d", ErrTableCoverageMismatch, len(result.BlockHashes), result.Ref.TableSize)
+	}
+	// The entries must belong to the table being written. The root is not
+	// recomputed here: the caller has just produced it, and the read path
+	// re-derives it before serving the record.
+	if err := checkEntryBlocks(result.Entries, result.Ref); err != nil {
+		return err
 	}
 
 	raw := encodeTableRecord(result)
@@ -188,9 +198,15 @@ func (s *HotTableStore) Prune(keepFrom uint64) (int, error) {
 			continue
 		}
 		ref, err := decodeHotStoreKey(k)
+		if err == nil {
+			err = validateTableRef(ref)
+		}
 		if err != nil {
-			// An unreadable key is a damaged record: drop it so it cannot be
-			// mistaken for a usable table.
+			// An unreadable key, or one naming a table that cannot exist, is a
+			// damaged record: drop it so it cannot be mistaken for a usable
+			// table. Its covered range is meaningless, so a key like this would
+			// otherwise never be evicted by the watermark below and would sit in
+			// the bucket forever.
 			if err := cursor.DeleteCurrent(); err != nil {
 				return pruned, fmt.Errorf("prune damaged record: %w", err)
 			}

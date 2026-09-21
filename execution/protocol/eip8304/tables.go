@@ -81,7 +81,10 @@ type CanonicalData interface {
 //     using it. Rejection never aborts the block.
 //   - PutTable records a table as canonical, atomically or not at all. The
 //     finalize path calls it only after the table's system call succeeded,
-//     never before, and treats an error as aborting the block.
+//     never before, and treats an error as aborting the block. It rejects a
+//     result whose entries do not belong to the table's block range, so a
+//     writer bug fails the block instead of leaving a record the read path
+//     would serve as this table's root.
 type TableStore interface {
 	CanonicalData
 	GetTable(ref TableRef) (TableResult, bool, error)
@@ -100,16 +103,20 @@ func RootOfEntries(entries Entries, limit uint64) (common.Hash, error) {
 }
 
 // VerifyTable reports whether a precomputed result may be used for ref on the
-// current canonical chain. It checks identity, entry count, canonical block-hash
-// binding and canonical entry order, then the expensive check: that the stored
-// root is the root the stored entries actually produce. The last check is what
-// catches a truncated, partially written or otherwise corrupted row.
+// current canonical chain. It checks identity and the canonical block-hash
+// binding of the covered range, then that the result is consistent with itself
+// (see checkResultShape).
+//
+// It deliberately does not recompute the canonical entries: doing so is the
+// rebuild the cache exists to avoid. What the checks establish is that the
+// record describes this table's range on this chain, that its entries belong to
+// that range, and that its root is the root of those entries. A record that
+// satisfies all of that but holds different (self-consistent) entry content was
+// not written by this node's own computation and is trusted to the record
+// checksum, not to verification.
 func VerifyTable(result TableResult, ref TableRef, chain CanonicalChain, limit uint64) error {
 	if result.Ref != ref {
 		return fmt.Errorf("%w: have %+v, want %+v", ErrTableRefMismatch, result.Ref, ref)
-	}
-	if result.EntryCount != uint64(len(result.Entries)) {
-		return fmt.Errorf("%w: entry_count %d, %d entries", ErrTableEntryCount, result.EntryCount, len(result.Entries))
 	}
 	if uint64(len(result.BlockHashes)) != ref.TableSize {
 		return fmt.Errorf("%w: %d hashes for table_size %d", ErrTableCoverageMismatch, len(result.BlockHashes), ref.TableSize)
@@ -124,8 +131,24 @@ func VerifyTable(result TableResult, ref TableRef, chain CanonicalChain, limit u
 			return fmt.Errorf("%w: block %d", ErrTableNotCanonical, block)
 		}
 	}
+	return checkResultShape(result, ref, limit)
+}
+
+// checkResultShape reports whether a result agrees with itself and with the
+// table it claims to be, without consulting the canonical chain: entry count,
+// canonical entry order, entries inside the covered range's block window, and
+// the root derived from those entries. Both the read path (VerifyTable) and the
+// restart check (Reconcile) use it, so a record cannot be acceptable to one and
+// not the other.
+func checkResultShape(result TableResult, ref TableRef, limit uint64) error {
+	if result.EntryCount != uint64(len(result.Entries)) {
+		return fmt.Errorf("%w: entry_count %d, %d entries", ErrTableEntryCount, result.EntryCount, len(result.Entries))
+	}
 	if !entriesSorted(result.Entries) {
 		return ErrTableUnsortedEntries
+	}
+	if err := checkEntryBlocks(result.Entries, ref); err != nil {
+		return err
 	}
 	root, err := RootOfEntries(result.Entries, limit)
 	if err != nil {
@@ -133,6 +156,28 @@ func VerifyTable(result TableResult, ref TableRef, chain CanonicalChain, limit u
 	}
 	if root != result.Root {
 		return fmt.Errorf("%w: have %x, want %x", ErrTableRootMismatch, result.Root, root)
+	}
+	return nil
+}
+
+// checkEntryBlocks reports whether every entry can belong to a table covering
+// ref. Entries carry the block they were built for, and a table that does not
+// start at genesis also carries one parent-hash entry for block FirstBlock-1
+// (see buildBlockEntriesFromHashes), so the window is
+// [FirstBlock-1, FirstBlock+TableSize-1] (clamped at block 0). A record whose
+// entries come from another block range fails here even when its root matches
+// those entries, which is what stops the resolver from serving a table built
+// for different blocks.
+func checkEntryBlocks(entries Entries, ref TableRef) error {
+	low := ref.FirstBlock
+	if low > 0 {
+		low--
+	}
+	high := ref.FirstBlock + ref.TableSize - 1
+	for _, entry := range entries {
+		if entry.block < low || entry.block > high {
+			return fmt.Errorf("%w: entry for block %d outside %+v", ErrTableCoverageMismatch, entry.block, ref)
+		}
 	}
 	return nil
 }
@@ -163,9 +208,11 @@ type ResolverStats struct {
 
 // Resolver resolves due tables from verified precomputed results, falling back
 // to a deterministic synchronous rebuild whenever a result is missing, corrupt
-// or no longer bound to the canonical chain. It never returns a root that was
-// not derived from canonical data, and it never persists a result: the caller
-// marks a table canonical only after the table's system call succeeded.
+// or no longer bound to the canonical chain. It never returns a stale root —
+// a precomputed result is used only while it verifies against the canonical
+// chain and the range it claims (see VerifyTable) — and it never persists a
+// result: the caller marks a table canonical only after the table's system call
+// succeeded.
 //
 // A Resolver is not safe for concurrent use; the finalize path is synchronous.
 type Resolver struct {

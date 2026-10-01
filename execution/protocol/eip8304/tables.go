@@ -161,23 +161,61 @@ func checkResultShape(result TableResult, ref TableRef, limit uint64) error {
 }
 
 // checkEntryBlocks reports whether every entry can belong to a table covering
-// ref. Entries carry the block they were built for, and a table that does not
-// start at genesis also carries one parent-hash entry for block FirstBlock-1
-// (see buildBlockEntriesFromHashes), so the window is
+// ref, and whether the table's block-hash entries are exactly the ones such a
+// table must carry.
+//
+// Entries carry the block they were built for, and a table that does not start
+// at genesis also carries one parent-hash entry for block FirstBlock-1 (see
+// buildBlockEntriesFromHashes), so the window is
 // [FirstBlock-1, FirstBlock+TableSize-1] (clamped at block 0). A record whose
 // entries come from another block range fails here even when its root matches
 // those entries, which is what stops the resolver from serving a table built
 // for different blocks.
+//
+// The window on its own still accepts a self-consistent record whose block
+// entries are duplicated, missing or shifted inside the window, and nothing
+// downstream would catch it: the read path deliberately never recomputes the
+// canonical entries, so it compares a record's root only against that record's
+// own entries. So the block entries must be exactly the set a merge of the
+// covered blocks produces — one per covered block except genesis — with block
+// fields FirstBlock-1 .. FirstBlock+TableSize-2, each exactly once.
 func checkEntryBlocks(entries Entries, ref TableRef) error {
 	low := ref.FirstBlock
 	if low > 0 {
 		low--
 	}
 	high := ref.FirstBlock + ref.TableSize - 1
+
+	// Block-hash entries: genesis has no parent, so a table that starts at
+	// block 0 carries one fewer, for blocks 0..TableSize-2.
+	blockLow, want := low, ref.TableSize
+	if ref.FirstBlock == 0 {
+		want--
+	}
+
+	// One bit per covered block; TableSize is at most 256, so a fixed array
+	// keeps this allocation-free on the read path.
+	var seen [4]uint64
+	got := uint64(0)
 	for _, entry := range entries {
 		if entry.block < low || entry.block > high {
 			return fmt.Errorf("%w: entry for block %d outside %+v", ErrTableCoverageMismatch, entry.block, ref)
 		}
+		if entry.Type != EntryBlock {
+			continue
+		}
+		got++
+		if want == 0 || entry.block < blockLow || entry.block > blockLow+want-1 {
+			return fmt.Errorf("%w: block entry for block %d is not part of %+v", ErrTableCoverageMismatch, entry.block, ref)
+		}
+		bit := entry.block - blockLow
+		if seen[bit/64]&(1<<(bit%64)) != 0 {
+			return fmt.Errorf("%w: duplicate block entry for block %d in %+v", ErrTableCoverageMismatch, entry.block, ref)
+		}
+		seen[bit/64] |= 1 << (bit % 64)
+	}
+	if got != want {
+		return fmt.Errorf("%w: %d block entries, want %d for %+v", ErrTableCoverageMismatch, got, want, ref)
 	}
 	return nil
 }

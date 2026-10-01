@@ -820,3 +820,112 @@ func TestApplyDueTablesFillsAndReusesTheHotStore(t *testing.T) {
 		require.Equal(t, root, record.Root, "%+v must keep the root it was written with", ref)
 	}
 }
+
+// TestResolverRejectsRecordsWithReshapedBlockEntries covers the entry-set
+// bind: a record that stays inside the covered window, agrees with itself
+// (checksum valid, root of its own entries, hashes matching the key) but whose
+// block-hash entries are duplicated, missing or shifted must still be rejected.
+//
+// Nothing downstream would catch this class: verification never recomputes the
+// canonical entries, so a self-consistent record's root is compared only
+// against that same record's entries. Serving such a record would publish a
+// root this node never computed.
+func TestResolverRejectsRecordsWithReshapedBlockEntries(t *testing.T) {
+	db := newHotStoreDB(t)
+	chain := newTestChain(t, 16)
+	tx := beginHotStoreTx(t, db)
+	defer tx.Rollback()
+	store := newTestHotStore(t, tx, chain, 15)
+
+	l0 := L0(4)
+	level4 := TableRef{FirstBlock: 0, TableSize: 4}
+
+	cases := []struct {
+		name    string
+		ref     TableRef
+		reshape func(t *testing.T, entries Entries) Entries
+	}{
+		{
+			name: "duplicated block entry",
+			ref:  l0,
+			reshape: func(t *testing.T, entries Entries) Entries {
+				for _, entry := range entries {
+					if entry.Type == EntryBlock {
+						return append(entries, entry)
+					}
+				}
+				t.Fatal("the table has no block entry to duplicate")
+				return nil
+			},
+		},
+		{
+			name: "missing block entry",
+			ref:  level4,
+			reshape: func(t *testing.T, entries Entries) Entries {
+				for i, entry := range entries {
+					if entry.Type == EntryBlock {
+						return append(entries[:i:i], entries[i+1:]...)
+					}
+				}
+				t.Fatal("the table has no block entry to drop")
+				return nil
+			},
+		},
+		{
+			name: "block entry shifted inside the window",
+			ref:  level4,
+			reshape: func(t *testing.T, entries Entries) Entries {
+				last := -1
+				for i, entry := range entries {
+					if entry.Type == EntryBlock && (last == -1 || entry.block > entries[last].block) {
+						last = i
+					}
+				}
+				if last == -1 {
+					t.Fatal("the table has no block entry to shift")
+				}
+				entries[last].block = level4.FirstBlock + level4.TableSize - 1
+				return entries
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			oracle := oracleRoot(t, chain, tc.ref, hotStoreTestLimit)
+			wrong := hotStoreSeed(t, chain, tc.ref)
+			wrong.Entries = tc.reshape(t, wrong.Entries)
+			wrong = reseal(t, wrong)
+			require.NotEqual(t, oracle, wrong.Root, "the reshaped record must not happen to carry the right root")
+
+			// Straight into the bucket: what a writer bug or a tampered disk
+			// would leave behind. Every checksum is valid.
+			require.NoError(t, tx.Put(kv.Eip8304Tables, hotStoreKey(tc.ref), encodeTableRecord(wrong)))
+
+			resolver := NewResolver(store, hotStoreTestLimit)
+			got, err := resolver.Table(tc.ref)
+			require.NoError(t, err)
+			require.Equal(t, oracle, got.Root, "a reshaped record must not become this table's root")
+			require.Equal(t, 0, resolver.Stats().Hits)
+			require.Equal(t, 1, resolver.Stats().Rejected)
+			require.ErrorIs(t, resolver.Stats().LastReject, ErrTableCoverageMismatch)
+
+			// A writer handing the store such a result fails the block instead
+			// of leaving a record the read path would have to catch.
+			require.ErrorIs(t, store.PutTable(wrong), ErrTableCoverageMismatch)
+		})
+	}
+}
+
+// reseal makes a record self-consistent again after its entries were changed:
+// canonical order, entry count, and the root of the new entries. The checksum
+// is recomputed by encodeTableRecord.
+func reseal(t *testing.T, result TableResult) TableResult {
+	t.Helper()
+	result.Entries.Sort()
+	result.EntryCount = uint64(len(result.Entries))
+	root, err := RootOfEntries(result.Entries, hotStoreTestLimit)
+	require.NoError(t, err)
+	result.Root = root
+	return result
+}

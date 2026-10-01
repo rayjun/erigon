@@ -374,7 +374,6 @@ func TestUpgradedDatadirStillOpensInAccedeMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("accede open after the upgrade failed: %v", err)
 	}
-	defer accede.Close()
 	if err := accede.View(context.Background(), func(tx kv.Tx) error {
 		major, minor, _, ok, err := rawdb.ReadDBSchemaVersion(tx)
 		if err != nil {
@@ -388,6 +387,50 @@ func TestUpgradedDatadirStillOpensInAccedeMode(t *testing.T) {
 		return err
 	}); err != nil {
 		t.Fatalf("reading the new bucket: %v", err)
+	}
+	accede.Close()
+
+	// 4. The upgraded bucket is writable and walkable, not merely present: a
+	// node that starts after the upgrade has to be able to store and read back
+	// a hot table record, keyed the way the store keys one.
+	upgraded, err := mdbx.New(dbcfg.ChainDB, log.New()).Path(chaindata).Open(context.Background())
+	if err != nil {
+		t.Fatalf("reopen after the upgrade: %v", err)
+	}
+	defer upgraded.Close()
+	recordKey := make([]byte, 1+8+8)
+	recordKey[0] = 1 // record version
+	binary.BigEndian.PutUint64(recordKey[1:9], 0)
+	binary.BigEndian.PutUint64(recordKey[9:17], 4)
+	if err := upgraded.Update(context.Background(), func(tx kv.RwTx) error {
+		if err := tx.Put(kv.Eip8304Tables, recordKey, []byte("record")); err != nil {
+			return err
+		}
+		got, err := tx.GetOne(kv.Eip8304Tables, recordKey)
+		if err != nil {
+			return err
+		}
+		if string(got) != "record" {
+			t.Errorf("round trip through the new bucket returned %q", got)
+		}
+		cursor, err := tx.RwCursor(kv.Eip8304Tables)
+		if err != nil {
+			return err
+		}
+		defer cursor.Close()
+		seen := 0
+		for k, _, err := cursor.First(); k != nil; k, _, err = cursor.Next() {
+			if err != nil {
+				return err
+			}
+			seen++
+		}
+		if seen != 1 {
+			t.Errorf("new bucket holds %d records, want 1", seen)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("writing to the upgraded bucket: %v", err)
 	}
 }
 

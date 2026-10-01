@@ -487,6 +487,13 @@ func (c *Config) IsEip8304(time uint64) bool {
 	return isForked(c.Eip8304Time, time)
 }
 
+// IsEip8304Scheduled reports whether this config activates the experimental
+// EIP-8304 fork at any time. Every shipped network leaves Eip8304Time nil, so
+// the fork's recovery hooks are free unless a node opts in explicitly.
+func (c *Config) IsEip8304Scheduled() bool {
+	return c != nil && c.Eip8304Time != nil
+}
+
 func (c *Config) GetBurntContract(num uint64) accounts.Address {
 	if len(c.BurntContract) == 0 {
 		return accounts.NilAddress

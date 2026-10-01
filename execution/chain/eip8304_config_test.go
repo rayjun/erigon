@@ -67,6 +67,7 @@ func TestConfigEip8304DefaultNetworksNotAffected(t *testing.T) {
 		t.Run(s.Name, func(t *testing.T) {
 			assert.Nil(t, s.Config.Eip8304Time, "%s must not schedule the experimental fork", s.Name)
 			assert.False(t, s.Config.IsEip8304(uint64(1<<62)), "%s must not be EIP-8304 active", s.Name)
+			assert.False(t, s.Config.IsEip8304Scheduled(), "%s must keep the recovery hooks free", s.Name)
 		})
 	}
 }

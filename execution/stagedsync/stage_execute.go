@@ -44,6 +44,7 @@ import (
 	"github.com/erigontech/erigon/diagnostics/metrics"
 	"github.com/erigontech/erigon/execution/chain"
 	"github.com/erigontech/erigon/execution/exec"
+	"github.com/erigontech/erigon/execution/protocol/eip8304"
 	"github.com/erigontech/erigon/execution/protocol/rules"
 	"github.com/erigontech/erigon/execution/stagedsync/stages"
 	"github.com/erigontech/erigon/execution/types"
@@ -453,6 +454,13 @@ func UnwindExecutionStage(u *UnwindState, s *StageState, doms *execctx.SharedDom
 		return err
 	}
 
+	// EIP-8304 tables covering a removed block are unusable from here on. This
+	// runs inside the unwind's transaction, so a failure rolls the unwind back
+	// instead of leaving the store bound to a chain the node did not adopt.
+	if err := invalidateEip8304Tables(cfg, rwTx, u.UnwindPoint, logger); err != nil {
+		return err
+	}
+
 	if err = u.Done(rwTx); err != nil {
 		return err
 	}
@@ -461,6 +469,39 @@ func UnwindExecutionStage(u *UnwindState, s *StageState, doms *execctx.SharedDom
 	// leaves doms inconsistent for the next re-execution, so surface it.
 	if _, _, err = doms.SeekCommitment(ctx, rwTx); err != nil {
 		return fmt.Errorf("unwind: SeekCommitment after disk unwind: %w", err)
+	}
+	return nil
+}
+
+// invalidateEip8304Tables drops the EIP-8304 tables an unwind invalidated.
+//
+// A stored record covering a removed block is not dangerous — the read path
+// binds every record to the canonical hashes of its range and would reject it —
+// but leaving it behind would pay the rebuild cost on every read until it is
+// overwritten, and an in-flight merge job could still be holding it. Invalidate
+// deletes by covered range, reads no block data and needs no SSZ bound, so the
+// unwind path can drop them while that bound is still unresolved.
+//
+// The hook is free on every shipped network: they leave Eip8304Time nil, so
+// IsEip8304Scheduled is false and the EIP-8304 bucket is never touched. It is
+// called only on the path that actually removed blocks: the early return above
+// unwinds nothing on disk, and bumping the generation there would reject
+// running merge jobs for a chain that did not change.
+func invalidateEip8304Tables(cfg ExecuteBlockCfg, tx kv.RwTx, unwindPoint uint64, logger log.Logger) error {
+	if !cfg.chainConfig.IsEip8304Scheduled() {
+		return nil
+	}
+	recovery, err := eip8304.NewTableRecovery(tx)
+	if err != nil {
+		return err
+	}
+	from := unwindPoint + 1
+	dropped, err := recovery.Invalidate(from)
+	if err != nil {
+		return fmt.Errorf("invalidate EIP-8304 tables from block %d: %w", from, err)
+	}
+	if dropped > 0 {
+		logger.Info("Invalidated EIP-8304 tables after unwind", "from", from, "dropped", dropped)
 	}
 	return nil
 }

@@ -39,11 +39,15 @@ func isHotStoreMetaKey(key []byte) bool {
 // Generation returns the store's current invalidation generation. It starts at
 // 0 and is bumped by every Invalidate.
 func (s *HotTableStore) Generation() (uint64, error) {
-	return s.readGeneration()
+	return readGeneration(s.tx)
 }
 
 func (s *HotTableStore) readGeneration() (uint64, error) {
-	raw, err := s.tx.GetOne(kv.Eip8304Tables, hotStoreMetaKey)
+	return readGeneration(s.tx)
+}
+
+func readGeneration(db kv.Getter) (uint64, error) {
+	raw, err := db.GetOne(kv.Eip8304Tables, hotStoreMetaKey)
 	if err != nil {
 		return 0, fmt.Errorf("read table store generation: %w", err)
 	}
@@ -56,10 +60,10 @@ func (s *HotTableStore) readGeneration() (uint64, error) {
 	return binary.BigEndian.Uint64(raw), nil
 }
 
-func (s *HotTableStore) writeGeneration(generation uint64) error {
+func writeGeneration(tx kv.RwTx, generation uint64) error {
 	var raw [8]byte
 	binary.BigEndian.PutUint64(raw[:], generation)
-	if err := s.tx.Put(kv.Eip8304Tables, hotStoreMetaKey, raw[:]); err != nil {
+	if err := tx.Put(kv.Eip8304Tables, hotStoreMetaKey, raw[:]); err != nil {
 		return fmt.Errorf("write table store generation: %w", err)
 	}
 	return nil
@@ -69,23 +73,56 @@ func (s *HotTableStore) writeGeneration(generation uint64) error {
 // table an unwind to that height could have invalidated, and bumps the
 // generation so in-flight jobs cannot write results back afterwards. Records
 // covering only blocks before `from` are untouched.
-//
-// `from` is the first block that no longer exists after the unwind: a caller
-// unwinding to height H (H itself surviving) passes H+1. A table is invalid as
-// soon as its range contains a removed block, which is why the test is on the
-// range's end (end >= from) and not on its start.
 func (s *HotTableStore) Invalidate(from uint64) (int, error) {
-	generation, err := s.readGeneration()
+	return invalidateTables(s.tx, from)
+}
+
+// TableRecovery is the part of the store an unwind needs, and deliberately not
+// a HotTableStore: invalidation deletes records by covered range and never
+// decodes entries, so it needs neither canonical block data nor the SSZ list
+// bound, and it must be callable from the staged-sync unwind path while both of
+// those are still unresolved. The restart check (Reconcile) does need them, so
+// it stays on HotTableStore.
+type TableRecovery struct {
+	tx kv.RwTx
+}
+
+// NewTableRecovery returns a recovery handle over tx. It reports a nil
+// transaction instead of writing nothing silently.
+func NewTableRecovery(tx kv.RwTx) (*TableRecovery, error) {
+	if tx == nil {
+		return nil, ErrNilTableStoreTx
+	}
+	return &TableRecovery{tx: tx}, nil
+}
+
+// Invalidate has the semantics documented on HotTableStore.Invalidate.
+func (r *TableRecovery) Invalidate(from uint64) (int, error) {
+	return invalidateTables(r.tx, from)
+}
+
+// Generation reports the persisted invalidation generation.
+func (r *TableRecovery) Generation() (uint64, error) {
+	return readGeneration(r.tx)
+}
+
+// invalidateTables is the shared implementation: the criterion is the end of
+// the covered range, not its start, because a table is invalid as soon as its
+// range contains a removed block. `from` is the first block that no longer
+// exists after the unwind, so unwinding to height H (H itself surviving) passes
+// H+1.
+func invalidateTables(tx kv.RwTx, from uint64) (int, error) {
+	generation, err := readGeneration(tx)
 	if err != nil {
 		return 0, err
 	}
 	// Bump before deleting: if the delete below fails halfway, stale jobs must
 	// already be rejected, which is the safe direction to fail in.
-	if err := s.writeGeneration(generation + 1); err != nil {
+	if err := writeGeneration(tx, generation+1); err != nil {
 		return 0, err
 	}
 
-	cursor, err := s.tx.RwCursor(kv.Eip8304Tables)
+	cursor, err := tx.RwCursor(kv.Eip8304Tables)
 	if err != nil {
 		return 0, fmt.Errorf("invalidate table store: %w", err)
 	}

@@ -84,10 +84,9 @@ func (p *StageProgress) ExecutedHeight() (uint64, error) {
 // ReceiptSource returns a block's receipts in transaction order, with the
 // receipt fields the entry builder needs already derived.
 //
-// It is an interface on purpose: which sync input can serve the last 319
-// blocks' receipts without --prune.include-receipts is still an open question
-// (docs/eip8304/open-questions.md, T3.3), so the source stays a dependency of
-// the node-side adapter instead of being hardcoded here.
+// It is an interface on purpose: which sync input can serve receipts without
+// --prune.include-receipts is still undecided, so the production source stays a
+// dependency of the node-side adapter instead of being hardcoded here.
 type ReceiptSource interface {
 	Receipts(block uint64) (types.Receipts, error)
 }

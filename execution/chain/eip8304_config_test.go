@@ -27,27 +27,33 @@ import (
 
 // TestConfigEip8304ForkActivation covers the experimental fork scheduling:
 // nil means not scheduled, 0 means active from genesis, and a concrete time
-// activates the fork from that timestamp on. The fork is experimental, so no
-// shipped network configuration may schedule it.
+// activates the fork from that timestamp on. "Scheduled" and "active" are
+// separate questions: a config with a future activation time is scheduled while
+// IsEip8304 is still false, which is what lets the recovery hooks run on a chain
+// whose fork has not started. The fork is experimental, so no shipped network
+// configuration may schedule it.
 func TestConfigEip8304ForkActivation(t *testing.T) {
 	cases := []struct {
-		name string
-		time *uint64
-		head uint64
-		want bool
+		name      string
+		time      *uint64
+		head      uint64
+		want      bool
+		scheduled bool
 	}{
-		{"nil never activates", nil, 1 << 62, false},
-		{"zero activates from genesis", ptr64(0), 0, true},
-		{"before activation time", ptr64(1000), 999, false},
-		{"at activation time", ptr64(1000), 1000, true},
-		{"after activation time", ptr64(1000), 1001, true},
+		{"nil never activates", nil, 1 << 62, false, false},
+		{"zero activates from genesis", ptr64(0), 0, true, true},
+		{"before activation time", ptr64(1000), 999, false, true},
+		{"at activation time", ptr64(1000), 1000, true, true},
+		{"after activation time", ptr64(1000), 1001, true, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			cfg := &chain.Config{Eip8304Time: c.time}
 			assert.Equal(t, c.want, cfg.IsEip8304(c.head))
+			assert.Equal(t, c.scheduled, cfg.IsEip8304Scheduled())
 		})
 	}
+	assert.False(t, (*chain.Config)(nil).IsEip8304Scheduled())
 }
 
 // TestConfigEip8304DefaultNetworksNotAffected locks the invariant that no

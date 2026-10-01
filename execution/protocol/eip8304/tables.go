@@ -161,24 +161,21 @@ func checkResultShape(result TableResult, ref TableRef, limit uint64) error {
 }
 
 // checkEntryBlocks reports whether every entry can belong to a table covering
-// ref, and whether the table's block-hash entries are exactly the ones such a
-// table must carry.
+// ref, and whether the table's block entries are exactly the ones such a table
+// must carry.
 //
-// Entries carry the block they were built for, and a table that does not start
+// Entries carry the block they were built for and a table that does not start
 // at genesis also carries one parent-hash entry for block FirstBlock-1 (see
-// buildBlockEntriesFromHashes), so the window is
-// [FirstBlock-1, FirstBlock+TableSize-1] (clamped at block 0). A record whose
-// entries come from another block range fails here even when its root matches
-// those entries, which is what stops the resolver from serving a table built
-// for different blocks.
+// buildBlockEntriesFromHashes), so every entry must fall in
+// [FirstBlock-1, FirstBlock+TableSize-1] (clamped at block 0), and the block
+// entries must be the set a merge of the covered blocks produces: block fields
+// FirstBlock-1 .. FirstBlock+TableSize-2, each exactly once, genesis having no
+// parent.
 //
-// The window on its own still accepts a self-consistent record whose block
-// entries are duplicated, missing or shifted inside the window, and nothing
-// downstream would catch it: the read path deliberately never recomputes the
-// canonical entries, so it compares a record's root only against that record's
-// own entries. So the block entries must be exactly the set a merge of the
-// covered blocks produces — one per covered block except genesis — with block
-// fields FirstBlock-1 .. FirstBlock+TableSize-2, each exactly once.
+// The exact set matters because verification never recomputes the canonical
+// entries: a record's root is compared only against that record's own entries,
+// so a self-consistent record whose block entries are duplicated, missing or
+// shifted inside the window would otherwise be served as the table's root.
 func checkEntryBlocks(entries Entries, ref TableRef) error {
 	low := ref.FirstBlock
 	if low > 0 {

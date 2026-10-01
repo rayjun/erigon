@@ -34,6 +34,8 @@ import (
 	"github.com/erigontech/erigon/db/snapshotsync/freezeblocks"
 	"github.com/erigontech/erigon/db/state/changeset"
 	"github.com/erigontech/erigon/db/state/execctx"
+	"github.com/erigontech/erigon/execution/chain"
+	"github.com/erigontech/erigon/execution/protocol/eip8304"
 	"github.com/erigontech/erigon/execution/stagedsync/stages"
 	"github.com/erigontech/erigon/execution/types"
 )
@@ -133,7 +135,13 @@ func TestUnwindExecutionStage_PrunesUncommittedOverlayWrite(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, reexecVal, got, "precondition: re-exec-range write must be visible pre-unwind")
 
-	cfg := ExecuteBlockCfg{blockReader: br}
+	// The early return removes nothing from disk, so the EIP-8304 hook must not
+	// fire: give the config a scheduled fork and seed a table that a real unwind
+	// would have to drop, and neither may change.
+	zero := uint64(0)
+	cfg := ExecuteBlockCfg{blockReader: br, chainConfig: &chain.Config{Eip8304Time: &zero}}
+	protected := seedStoredTable(t, tx, 0, 4)
+
 	s := &StageState{ID: stages.Execution, BlockNumber: committedBlock}
 	u := &UnwindState{ID: stages.Execution, UnwindPoint: unwindPoint, CurrentBlockNumber: failedBlock}
 	require.GreaterOrEqual(t, u.UnwindPoint, s.BlockNumber, "test must exercise the no-op-disk-unwind branch")
@@ -169,6 +177,16 @@ func TestUnwindExecutionStage_PrunesUncommittedOverlayWrite(t *testing.T) {
 	got, _, err = doms.GetLatest(kv.StorageDomain, tx, keepKey)
 	require.NoError(t, err)
 	require.Equal(t, keepVal, got, "write at/below committed progress must survive the prune")
+
+	// The no-op branch removed no blocks, so the EIP-8304 store is untouched:
+	// neither the seeded table nor the generation may change.
+	require.True(t, storedTableExists(t, tx, protected),
+		"an overlay-only unwind must not drop stored tables")
+	recovery, err := eip8304.NewTableRecovery(tx)
+	require.NoError(t, err)
+	generation, err := recovery.Generation()
+	require.NoError(t, err)
+	require.Zero(t, generation, "an overlay-only unwind must not bump the generation")
 }
 
 func makeHeader(number uint64, root common.Hash) *types.Header {

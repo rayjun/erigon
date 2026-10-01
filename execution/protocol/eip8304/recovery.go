@@ -73,6 +73,9 @@ func writeGeneration(tx kv.RwTx, generation uint64) error {
 // table an unwind to that height could have invalidated, and bumps the
 // generation so in-flight jobs cannot write results back afterwards. Records
 // covering only blocks before `from` are untouched.
+//
+// `from` is the first block that no longer exists after the unwind: unwinding
+// to height H (H itself surviving) passes H+1.
 func (s *HotTableStore) Invalidate(from uint64) (int, error) {
 	return invalidateTables(s.tx, from)
 }
@@ -96,7 +99,10 @@ func NewTableRecovery(tx kv.RwTx) (*TableRecovery, error) {
 	return &TableRecovery{tx: tx}, nil
 }
 
-// Invalidate has the semantics documented on HotTableStore.Invalidate.
+// Invalidate drops every record whose covered range reaches `from` and bumps
+// the generation, with the same semantics as HotTableStore.Invalidate: `from`
+// is the first block that no longer exists after the unwind, so unwinding to
+// height H (H itself surviving) passes H+1.
 func (r *TableRecovery) Invalidate(from uint64) (int, error) {
 	return invalidateTables(r.tx, from)
 }
@@ -106,11 +112,9 @@ func (r *TableRecovery) Generation() (uint64, error) {
 	return readGeneration(r.tx)
 }
 
-// invalidateTables is the shared implementation: the criterion is the end of
-// the covered range, not its start, because a table is invalid as soon as its
-// range contains a removed block. `from` is the first block that no longer
-// exists after the unwind, so unwinding to height H (H itself surviving) passes
-// H+1.
+// invalidateTables is the shared implementation. The criterion is the end of the
+// covered range, not its start: a table is invalid as soon as its range
+// contains a removed block.
 func invalidateTables(tx kv.RwTx, from uint64) (int, error) {
 	generation, err := readGeneration(tx)
 	if err != nil {

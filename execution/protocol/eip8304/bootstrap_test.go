@@ -170,6 +170,28 @@ func TestBootstrapRebuildsAFullWindowFromReceipts(t *testing.T) {
 	require.Equal(t, len(result.Tables[0].Entries), result.Entries)
 	require.GreaterOrEqual(t, result.Stats.Rebuilds, 256)
 	require.Len(t, chain.puts, 256, "every level-0 record of the window is written")
+	require.NotZero(t, result.RecordedBytes, "the pass reports the disk it wrote")
+}
+
+// TestBootstrapIsNotIncremental: running the pass twice for the same block
+// rebuilds the same records and overwrites them; it neither appends a second
+// copy nor changes the roots. A caller runs it once per block.
+func TestBootstrapIsNotIncremental(t *testing.T) {
+	const limit = uint64(1 << 12)
+	const tip = 319
+	chain := newTestChain(t, tip+1)
+
+	first, err := Bootstrap(tip, activeAlways, NewResolver(chain, limit), true)
+	require.NoError(t, err)
+	written := len(chain.puts)
+	require.NotZero(t, written)
+
+	second, err := Bootstrap(tip, activeAlways, NewResolver(chain, limit), true)
+	require.NoError(t, err)
+	require.Equal(t, first.Tables[0].Root, second.Tables[0].Root)
+	require.Equal(t, first.Recorded, second.Recorded)
+	require.Len(t, chain.puts, 2*written, "the second pass writes every record again")
+	require.Len(t, chain.cached, written, "and overwrites instead of appending")
 }
 
 // TestBootstrapParityWithRecordedLevelZero covers the configuration parity the
@@ -256,8 +278,8 @@ func TestBootstrapCostOnAFullWindow(t *testing.T) {
 	start := time.Now()
 	result, err := Bootstrap(tip, activeAlways, NewResolver(chain, limit), true)
 	require.NoError(t, err)
-	t.Logf("bootstrap window=%d recorded=%d tables=%d entries=%d resolver_rebuilds=%d elapsed=%s",
-		result.LevelZero, result.Recorded, len(result.Tables), result.Entries, result.Stats.Rebuilds, time.Since(start))
+	t.Logf("bootstrap window=%d recorded=%d bytes=%d tables=%d entries=%d resolver_rebuilds=%d elapsed=%s",
+		result.LevelZero, result.Recorded, result.RecordedBytes, len(result.Tables), result.Entries, result.Stats.Rebuilds, time.Since(start))
 }
 
 // TestBootstrapMakesTheFirstPostSyncBlockDeterministic is the Week 16 exit

@@ -89,8 +89,14 @@ func activeRebuildTables(block uint64, activeAt func(uint64) bool) []TableRef {
 
 // PruneFloor is the oldest block a table store must keep to still rebuild the
 // tables due at `block`. It is the retention watermark a caller derives for
-// HotTableStore.Prune: pruning at or above it drops a level-0 record a future
-// due table can merge.
+// HotTableStore.Prune: the level-0 record of a block below it can no longer be
+// merged into any due table.
+//
+// The bound is tight, not conservative: at a block where the 256-block table is
+// due, the window's oldest block is exactly block-MaxTableLookback, so raising
+// the watermark by one drops a record the rebuild needs. At other blocks the
+// window is smaller and starts later, but the watermark is derived from the
+// worst case and stays put.
 func PruneFloor(block uint64) uint64 {
 	if block <= MaxTableLookback {
 		return 0
@@ -106,6 +112,9 @@ type BootstrapResult struct {
 	LevelZero int
 	// Recorded is how many level-0 records were written to the store.
 	Recorded int
+	// RecordedBytes is the encoded size of those records, the disk the pass
+	// added for the retention window.
+	RecordedBytes int
 	// Entries is the total entry count over the resolved tables.
 	Entries int
 	// Stats is the resolver delta over the whole pass, including the level-0
@@ -131,6 +140,10 @@ type BootstrapResult struct {
 // not recorded either. Like ApplyDueTables, the caller must run this inside the
 // transaction it will roll back if the block fails, so a partially recorded
 // window never becomes visible.
+//
+// The pass is not incremental: calling it again for the same block rebuilds the
+// window and overwrites the records with the same values. A caller runs it once
+// per block, before that block's ApplyDueTables.
 func Bootstrap(block uint64, activeAt func(uint64) bool, resolver *Resolver, record bool) (BootstrapResult, error) {
 	if activeAt == nil {
 		return BootstrapResult{}, ErrNilActivationPredicate
@@ -159,6 +172,7 @@ func Bootstrap(block uint64, activeAt func(uint64) bool, resolver *Resolver, rec
 				return BootstrapResult{}, fmt.Errorf("record level-0 table %d: %w", b, err)
 			}
 			result.Recorded++
+			result.RecordedBytes += len(encodeTableRecord(table))
 		}
 	}
 

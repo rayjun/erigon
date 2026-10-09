@@ -1,6 +1,7 @@
 package eip8304
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -38,7 +39,7 @@ func TestRebuildWindowIsTheDueTablesLeaves(t *testing.T) {
 		for b := range want {
 			expected = append(expected, b)
 		}
-		slicesSort(expected)
+		slices.Sort(expected)
 		require.Equal(t, expected, got, "block %d", block)
 
 		floor := uint64(0)
@@ -50,14 +51,6 @@ func TestRebuildWindowIsTheDueTablesLeaves(t *testing.T) {
 			require.GreaterOrEqual(t, b, floor, "block %d leaf %d", block, b)
 		}
 		require.LessOrEqual(t, len(got), 256, "block %d", block)
-	}
-}
-
-func slicesSort(v []uint64) {
-	for i := 1; i < len(v); i++ {
-		for j := i; j > 0 && v[j] < v[j-1]; j-- {
-			v[j], v[j-1] = v[j-1], v[j]
-		}
 	}
 }
 
@@ -224,20 +217,68 @@ func TestBootstrapParityWithRecordedLevelZero(t *testing.T) {
 
 // TestBootstrapFailsClosedWhenOnlyPartOfTheWindowIsAvailable: a node that
 // retains some of the covered blocks but not all must not publish a root built
-// from a short window.
+// from a short window. Where the hole is decides what the pass has written by
+// the time it stops, so an empty write set is not a general property; the
+// caller's transaction is what discards a partial window.
 func TestBootstrapFailsClosedWhenOnlyPartOfTheWindowIsAvailable(t *testing.T) {
 	const limit = uint64(1 << 12)
-	const tip = 319
+	const tip = 319 // window 0..255
+
+	t.Run("prefix hole", func(t *testing.T) {
+		chain := newTestChain(t, tip+1)
+		for block := range chain.blocks {
+			if block < 100 {
+				delete(chain.blocks, block)
+			}
+		}
+
+		_, err := Bootstrap(tip, activeAlways, NewResolver(chain, limit), true)
+		require.ErrorIs(t, err, ErrMissingBlockData)
+		require.Empty(t, chain.puts, "nothing is recorded before the missing input is reached")
+	})
+
+	t.Run("middle hole", func(t *testing.T) {
+		chain := newTestChain(t, tip+1)
+		delete(chain.blocks, 200)
+
+		_, err := Bootstrap(tip, activeAlways, NewResolver(chain, limit), true)
+		require.ErrorIs(t, err, ErrMissingBlockData)
+		require.Len(t, chain.puts, 200, "the walk records what it can before the hole")
+		require.Equal(t, uint64(199), chain.puts[len(chain.puts)-1].FirstBlock)
+	})
+}
+
+// TestBootstrapRollsBackAPartiallyRecordedWindow: the middle-hole case writes
+// level-0 records before it fails, and Bootstrap runs inside the caller's
+// transaction, so rolling that transaction back must take the partial window
+// with it.
+func TestBootstrapRollsBackAPartiallyRecordedWindow(t *testing.T) {
+	const limit = uint64(1 << 12)
+	const tip = 319 // window 0..255
 	chain := newTestChain(t, tip+1)
-	for block := range chain.blocks {
-		if block < 100 {
-			delete(chain.blocks, block)
+	delete(chain.blocks, 200)
+
+	db := newHotStoreDB(t)
+	tx := beginHotStoreTx(t, db)
+	store := newTestHotStore(t, tx, chain, tip)
+
+	_, err := Bootstrap(tip, activeAlways, NewResolver(store, limit), true)
+	require.ErrorIs(t, err, ErrMissingBlockData)
+
+	// The walk had already recorded the blocks before the hole.
+	if _, ok, err := store.GetTable(L0(199)); err != nil || !ok {
+		t.Fatalf("the partial window should have been written before the hole, ok=%v err=%v", ok, err)
+	}
+	tx.Rollback()
+
+	restarted := beginHotStoreTx(t, db)
+	defer restarted.Rollback()
+	fresh := newTestHotStore(t, restarted, chain, tip)
+	for _, b := range RebuildWindow(tip) {
+		if _, ok, err := fresh.GetTable(L0(b)); err != nil || ok {
+			t.Fatalf("block %d survived the rollback, ok=%v err=%v", b, ok, err)
 		}
 	}
-
-	_, err := Bootstrap(tip, activeAlways, NewResolver(chain, limit), true)
-	require.ErrorIs(t, err, ErrMissingBlockData)
-	require.Empty(t, chain.puts, "nothing is recorded before the missing input is reached")
 }
 
 // TestBootstrapIsGatedByActivation: tables the fork was not active for are

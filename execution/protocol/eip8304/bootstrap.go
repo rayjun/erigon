@@ -7,18 +7,13 @@ import (
 )
 
 // Bootstrap for a node that reaches a tip without having merged the window the
-// next block's delayed tables need.
+// next block's delayed tables need: the level-0 records of the blocks those
+// tables cover, which a node that synced past the window never computed.
 //
-// A table due at `block` merges the level-0 records of every block it covers,
-// and the largest table reaches back 319 blocks. A node that executed that
-// window already has the records in its store; a node that synced past it must
-// rebuild them from canonical data before the first post-sync block runs, or
-// ApplyDueTables stops on the missing input.
-//
-// RebuildWindow names the window, Bootstrap rebuilds it through the resolver
-// and (optionally) records its level-0 results in the caller's transaction, so
-// the delayed tables resolve from the store rather than from receipts. A
-// missing input fails the pass closed. Details: docs/eip8304/sync-rebuild.md.
+// RebuildWindow names the window; Bootstrap rebuilds it through the resolver
+// and, when asked, records its level-0 results in the caller's transaction.
+// Missing input fails the pass closed rather than shortening the window.
+// Rationale: docs/eip8304/sync-rebuild.md.
 
 // MaxTableLookback is how far back a table due at `block` can reach. The
 // 256-block level is written at first_block+319 (see WriteBlock), so a due
@@ -112,8 +107,9 @@ type BootstrapResult struct {
 	LevelZero int
 	// Recorded is how many level-0 records were written to the store.
 	Recorded int
-	// RecordedBytes is the encoded size of those records, the disk the pass
-	// added for the retention window.
+	// RecordedBytes is the total length of the encoded records written, i.e.
+	// the hot-store value bytes, without the key or the database's own
+	// overhead. A rewritten record is counted again.
 	RecordedBytes int
 	// Entries is the total entry count over the resolved tables.
 	Entries int
@@ -141,9 +137,11 @@ type BootstrapResult struct {
 // transaction it will roll back if the block fails, so a partially recorded
 // window never becomes visible.
 //
-// The pass is not incremental: calling it again for the same block rebuilds the
-// window and overwrites the records with the same values. A caller runs it once
-// per block, before that block's ApplyDueTables.
+// The pass is not incremental: it always rebuilds the whole window, and a
+// record already in the store is overwritten with the same value rather than
+// skipped (TestBootstrapIsNotIncremental). When to run it is the caller's
+// decision, and the sensible point is once per block, before that block's
+// ApplyDueTables.
 func Bootstrap(block uint64, activeAt func(uint64) bool, resolver *Resolver, record bool) (BootstrapResult, error) {
 	if activeAt == nil {
 		return BootstrapResult{}, ErrNilActivationPredicate

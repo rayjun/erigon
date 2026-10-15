@@ -298,6 +298,29 @@ func TestProofBindsTheRunNotTheQueriedRange(t *testing.T) {
 	require.ErrorIs(t, VerifyTableProof(narrowed, proofLimit), ErrProofBoundary)
 }
 
+// TestProofOnAMinimalTable covers the smallest table, size 1 at genesis. A
+// block with no receipts yields a table with nothing to prove, and the same
+// table with one log yields a single matching leaf with a neighbour on each
+// side.
+func TestProofOnAMinimalTable(t *testing.T) {
+	query := ProofQuery{FirstBlock: 0, LastBlock: 0, Type: EntryLogAddress, Value: addressValue(proofAddress)}
+
+	bare := newTestChainWith(t, 1, func(uint64) types.Receipts { return nil })
+	table := proofTable(t, bare, TableRef{FirstBlock: 0, TableSize: 1})
+	require.Zero(t, table.EntryCount)
+	_, err := ProveTable(table, query, proofLimit)
+	require.ErrorIs(t, err, ErrProofCoverage, "a table with no entries has nothing to prove")
+
+	chain := newTestChainWith(t, 1, fixedLogReceipts(0, 0, proofAddress, testHash(900)))
+	table = proofTable(t, chain, TableRef{FirstBlock: 0, TableSize: 1})
+	proof, err := ProveTable(table, query, proofLimit)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), proof.MatchCount)
+	require.Equal(t, proof.MatchStart-1, proof.Start)
+	require.Equal(t, proof.MatchStart+1, proof.Start+uint64(len(proof.Leaves))-1)
+	require.NoError(t, VerifyTableProof(proof, proofLimit))
+}
+
 func TestProofRejectsMalformedLeaves(t *testing.T) {
 	ref := TableRef{FirstBlock: 0, TableSize: 4}
 	query := ProofQuery{FirstBlock: 0, LastBlock: 3, Type: EntryLogAddress, Value: addressValue(proofAddress)}

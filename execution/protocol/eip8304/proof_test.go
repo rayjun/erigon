@@ -402,7 +402,7 @@ func TestProveTableRejectsQueriesTheTableCannotAnswer(t *testing.T) {
 		query ProofQuery
 	}{
 		{"range above the table", ProofQuery{FirstBlock: 16, LastBlock: 20, Type: EntryLogAddress, Value: addressValue(proofAddress)}},
-		{"range below the table", ProofQuery{FirstBlock: 0, LastBlock: 20, Type: EntryLogAddress, Value: addressValue(proofAddress)}},
+		{"range reaching past both ends", ProofQuery{FirstBlock: 0, LastBlock: 20, Type: EntryLogAddress, Value: addressValue(proofAddress)}},
 		{"reversed range", ProofQuery{FirstBlock: 9, LastBlock: 4, Type: EntryLogAddress, Value: addressValue(proofAddress)}},
 		{"block condition", ProofQuery{FirstBlock: 0, LastBlock: 3, Type: EntryBlock, Value: testHash(1)}},
 		{"transaction condition", ProofQuery{FirstBlock: 0, LastBlock: 3, Type: EntryTransaction, Value: testHash(1)}},
@@ -417,6 +417,30 @@ func TestProveTableRejectsQueriesTheTableCannotAnswer(t *testing.T) {
 			require.ErrorIs(t, VerifyTableProof(proof, proofLimit), ErrProofQuery)
 		})
 	}
+}
+
+// TestProveTableHandlesARangeBelowTheTable uses a table that does not start at
+// genesis, which is the only shape where a query can sit entirely below the
+// table's covered range and reach inside it from the other side.
+func TestProveTableHandlesARangeBelowTheTable(t *testing.T) {
+	chain := newTestChainWith(t, 16, fixedLogReceipts(4, 9, proofAddress, testHash(900)))
+	ref := TableRef{FirstBlock: 4, TableSize: 4}
+	table := proofTable(t, chain, ref)
+
+	// Entirely below the table, and overlapping its lower edge.
+	for _, blocks := range [][2]uint64{{0, 3}, {2, 5}} {
+		query := ProofQuery{FirstBlock: blocks[0], LastBlock: blocks[1], Type: EntryLogAddress, Value: addressValue(proofAddress)}
+		_, err := ProveTable(table, query, proofLimit)
+		require.ErrorIs(t, err, ErrProofQuery, "blocks [%d, %d] reach below %+v", blocks[0], blocks[1], ref)
+	}
+
+	// The same condition inside the table is answerable, so the rejection above
+	// is about the range and not about the condition.
+	query := ProofQuery{FirstBlock: 6, LastBlock: 7, Type: EntryLogAddress, Value: addressValue(proofAddress)}
+	proof, err := ProveTable(table, query, proofLimit)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), proof.MatchCount)
+	require.NoError(t, VerifyTableProof(proof, proofLimit))
 }
 
 func TestProveTableRejectsAnInconsistentTable(t *testing.T) {

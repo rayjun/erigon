@@ -12,20 +12,13 @@ import (
 	"github.com/erigontech/erigon/common"
 )
 
-// Local proof PoC: a versioned proof for one condition over one table, plus an
-// offline verifier that needs nothing but the proof and the SSZ list bound.
-//
-// Entries are sorted by their canonical encoding, and the encoding starts with
-// the entry type followed by the value, so every entry matching one
-// (type, value) condition is a contiguous run of leaves. A query adds a bounded
-// block range; because the block follows the value in the encoding, the entries
-// that match both still form one contiguous run. The proof reveals that run,
-// its two neighbours and one multi-proof, and the verifier re-derives the table
-// root from them. Format and threat model: docs/eip8304/proof-poc.md.
+// Local proof PoC: a versioned proof for one condition over one table, plus a
+// verifier that needs nothing but the proof and the SSZ list bound. Format,
+// threat model and evidence: docs/eip8304/proof-poc.md.
 
-// ProofFormatVersion is the format version of TableProof. The format is local
-// and versioned on purpose: spec-lock.md leaves proof serialization out of the
-// MVP, so this pins a shape without claiming to be the cross-client one.
+// ProofFormatVersion is the version of TableProof's encoding. The format is
+// local on purpose: the pinned spec leaves proof serialization open, so this
+// fixes a shape without claiming to be the cross-client one.
 const ProofFormatVersion uint8 = 1
 
 // Proof errors. Each names one way a proof can fail, so a caller can tell a
@@ -43,9 +36,11 @@ var (
 // ProofQuery is one condition over one bounded block range: entries of type
 // Type whose value equals Value, for blocks in [FirstBlock, LastBlock].
 //
-// The PoC supports a non-wildcard log address or log topic condition, which is
-// what a single-condition query needs. Block and transaction entries carry no
-// searchable condition of their own, so they are rejected.
+// Block and transaction entries carry no searchable condition of their own, so
+// only the log conditions are accepted, and a query never widens the value.
+// Because the block field follows the value in an entry's encoding, the entries
+// a query matches are one contiguous run of the leaf list, which is what lets a
+// proof about them stay short.
 type ProofQuery struct {
 	FirstBlock uint64
 	LastBlock  uint64
@@ -82,9 +77,11 @@ func (q ProofQuery) validate(ref TableRef) error {
 }
 
 // bounds returns the smallest and the largest canonical encoding an entry
-// matching q can have. The type and the value are the leading bytes of an
-// encoding and the entry type fixes its length, so every encoding inside the
-// interval belongs to a matching entry and every encoding outside it does not.
+// matching q can have. An encoding is
+// type || value || block || transaction || position, so the type and the value
+// are its leading bytes, the type fixes its length, and the block follows the
+// value: every encoding inside the interval belongs to a matching entry and
+// every encoding outside it does not.
 func (q ProofQuery) bounds() (lower, upper []byte) {
 	// validate rejected every type that is not a log condition, and the only
 	// widths a log entry has are the address and the hash, so the width is
@@ -211,19 +208,10 @@ func searchKeys(keys []EncodedEntry, bound []byte, strict bool) int {
 }
 
 // VerifyTableProof recomputes the table root from the revealed leaves and
-// siblings and then classifies them against the query's key interval. It reads
-// nothing but the proof and the SSZ list bound.
-//
-// What it establishes: the revealed leaves fold into the claimed root, they are
-// one contiguous window of the table's leaf list at Start, and the matching run
-// is exactly the leaves inside the query's key interval, bounded on each side
-// that exists. The rest of the list is covered by the root, and the leaf count
-// is mixed into that root (see listRootFromContents), so a proof cannot move the
-// run's boundaries or shrink the table without changing the root.
-//
-// What it does not establish: that the system contract holds this root, and
-// that the leaf list the generator started from is the canonical one. Those
-// bind in the following steps, not here (docs/eip8304/proof-poc.md).
+// siblings and then classifies them against the query's key interval, so the
+// matching run is exactly the leaves inside it. It reads nothing but the proof
+// and the SSZ list bound, and it checks the root the proof claims rather than a
+// root from the chain, which the caller supplies.
 func VerifyTableProof(proof TableProof, limit uint64) error {
 	if proof.Version != ProofFormatVersion {
 		return fmt.Errorf("%w: %d", ErrProofVersion, proof.Version)

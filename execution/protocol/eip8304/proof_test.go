@@ -127,7 +127,10 @@ func TestProofReportsAnEmptyResult(t *testing.T) {
 		proof, err := ProveTable(table, query, proofLimit)
 		require.NoError(t, err)
 		require.Zero(t, proof.MatchCount)
-		require.LessOrEqual(t, len(proof.Leaves), 2, "an empty result reveals only the neighbours")
+		require.Equal(t, proof.MatchStart-1, proof.Start, "an empty result still reveals the insertion point's neighbours")
+		require.Len(t, proof.Leaves, 2, "one leaf below the insertion point and one above")
+		require.Positive(t, proof.MatchStart)
+		require.Less(t, proof.MatchStart, proof.EntryCount)
 		require.NoError(t, VerifyTableProof(proof, proofLimit))
 	})
 
@@ -137,6 +140,8 @@ func TestProofReportsAnEmptyResult(t *testing.T) {
 			proof, err := ProveTable(table, query, proofLimit)
 			require.NoError(t, err)
 			require.Zero(t, proof.MatchCount, "blocks [%d, %d] hold no match", blocks[0], blocks[1])
+			require.Equal(t, proof.MatchStart-1, proof.Start)
+			require.Len(t, proof.Leaves, 2, "the insertion point keeps a neighbour on each side")
 			require.NoError(t, VerifyTableProof(proof, proofLimit))
 		}
 	})

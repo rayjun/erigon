@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"sort"
 
 	"github.com/erigontech/erigon/common"
 )
@@ -85,9 +86,14 @@ func (q ProofQuery) validate(ref TableRef) error {
 // encoding and the entry type fixes its length, so every encoding inside the
 // interval belongs to a matching entry and every encoding outside it does not.
 func (q ProofQuery) bounds() (lower, upper []byte) {
-	// Only log conditions reach here, and a log entry always carries its
-	// transaction and position fields, so the encoding length is fixed.
-	valueSize, _ := entryValueSize(q.Type)
+	// validate rejected every type that is not a log condition, and the only
+	// widths a log entry has are the address and the hash, so the width is
+	// fixed here. A log entry always carries its transaction and position
+	// fields, so the encoding length is fixed too (see Entry.Encode).
+	valueSize := hashLength
+	if q.Type == EntryLogAddress {
+		valueSize = addressLength
+	}
 	size := 2 + valueSize + 8 + 8
 	lower = make([]byte, size)
 	upper = make([]byte, size)
@@ -190,17 +196,18 @@ func ProveTable(table TableResult, query ProofQuery, limit uint64) (TableProof, 
 }
 
 // searchKeys returns the first index whose key is at or after `bound`, or the
-// first index strictly after it when strict is set.
+// first index strictly after it when strict is set. The caller has already put
+// the keys in canonical order (ProveTable runs checkResultShape first), so the
+// predicate is monotone and the range of matching entries is the interval
+// between the two searches.
 func searchKeys(keys []EncodedEntry, bound []byte, strict bool) int {
-	for i, key := range keys {
-		cmp := bytes.Compare(key, bound)
-		if cmp > 0 || (cmp == 0 && !strict) {
-			return i
+	return sort.Search(len(keys), func(i int) bool {
+		cmp := bytes.Compare(keys[i], bound)
+		if strict {
+			return cmp > 0
 		}
-	}
-	// The slice is sorted, so a scan is a linear binary search; keep it simple
-	// because the caller only builds one proof per query.
-	return len(keys)
+		return cmp >= 0
+	})
 }
 
 // VerifyTableProof recomputes the table root from the revealed leaves and

@@ -160,6 +160,18 @@ func checkResultShape(result TableResult, ref TableRef, limit uint64) error {
 	return nil
 }
 
+// coveredBlockWindow is the range of block fields a table covering ref may
+// carry. A table that does not start at genesis holds one parent entry for
+// block FirstBlock-1, and its last entry belongs to block
+// FirstBlock+TableSize-1.
+func coveredBlockWindow(ref TableRef) (uint64, uint64) {
+	low := ref.FirstBlock
+	if low > 0 {
+		low--
+	}
+	return low, ref.FirstBlock + ref.TableSize - 1
+}
+
 // checkEntryBlocks reports whether every entry can belong to a table covering
 // ref, and whether the table's block entries are exactly the ones such a table
 // must carry.
@@ -177,11 +189,7 @@ func checkResultShape(result TableResult, ref TableRef, limit uint64) error {
 // so a self-consistent record whose block entries are duplicated, missing or
 // shifted inside the window would otherwise be served as the table's root.
 func checkEntryBlocks(entries Entries, ref TableRef) error {
-	low := ref.FirstBlock
-	if low > 0 {
-		low--
-	}
-	high := ref.FirstBlock + ref.TableSize - 1
+	low, high := coveredBlockWindow(ref)
 
 	// Block-hash entries: genesis has no parent, so a table that starts at
 	// block 0 carries one fewer, for blocks 0..TableSize-2.

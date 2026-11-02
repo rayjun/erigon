@@ -79,6 +79,24 @@ func TestHotTableStoreRoundTripsThroughCommit(t *testing.T) {
 	require.Equal(t, result, got)
 }
 
+func TestHotTableStoreBoundsPendingRecords(t *testing.T) {
+	db := newHotStoreDB(t)
+	chain := newTestChain(t, MaxTableLookback+2)
+	tx := beginHotStoreTx(t, db)
+	defer tx.Rollback()
+	store := newTestHotStore(t, tx, chain, 0)
+
+	oldRef := L0(0)
+	newRef := L0(MaxTableLookback + 1)
+	require.NoError(t, store.PutTable(hotStoreSeed(t, chain, oldRef)))
+	require.NoError(t, store.PutTable(hotStoreSeed(t, chain, newRef)))
+
+	_, ok := store.pending[oldRef]
+	require.False(t, ok, "pending must not retain tables outside the merge lookback")
+	_, ok = store.pending[newRef]
+	require.True(t, ok)
+}
+
 func TestHotTableStoreMissIsNotAnError(t *testing.T) {
 	db := newHotStoreDB(t)
 	chain := newTestChain(t, 16)
@@ -358,6 +376,27 @@ func TestHotTableStorePrunesByCoveredRange(t *testing.T) {
 		require.NoError(t, err)
 		wantKept := ref.FirstBlock+ref.TableSize-1 >= 2
 		require.Equal(t, wantKept, ok, "retention follows the covered range, not arrival order (%+v)", ref)
+	}
+}
+
+func TestPruneHotTableRecordsNeedsOnlyTheTransaction(t *testing.T) {
+	db := newHotStoreDB(t)
+	chain := newTestChain(t, 8)
+	tx := beginHotStoreTx(t, db)
+	defer tx.Rollback()
+	store := newTestHotStore(t, tx, chain, 7)
+	for _, ref := range []TableRef{L0(1), L0(7)} {
+		require.NoError(t, store.PutTable(hotStoreSeed(t, chain, ref)))
+	}
+
+	pruned, err := PruneHotTableRecords(tx, 5)
+	require.NoError(t, err)
+	require.Equal(t, 1, pruned, "only L0(1) ends below the watermark")
+	reopened := newTestHotStore(t, tx, chain, 7)
+	for ref, want := range map[TableRef]bool{L0(1): false, L0(7): true} {
+		_, ok, err := reopened.GetTable(ref)
+		require.NoError(t, err)
+		require.Equal(t, want, ok, "%+v", ref)
 	}
 }
 

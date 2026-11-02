@@ -466,6 +466,14 @@ func InitAmsterdamPreDeploys(db kv.TemporalRwDB, config *chain.Config, logger lo
 	return domains.Commit(ctx, tx)
 }
 
+// PreSealFinalizer is the generation-time form of protocol.BlockFinalizer. It
+// runs after engine finalization but before the state root, and therefore
+// before the block hash exists. Implementations record table metadata only
+// after the generated block is sealed; they must not call Header.Hash() here.
+type PreSealFinalizer interface {
+	FinalizePreSeal(block, blockTime uint64, parentBlockHash common.Hash, receipts types.Receipts, syscall rules.SystemCall) error
+}
+
 // GenerateChain creates a chain of n blocks. The first block's
 // parent will be the provided parent. db is used to store
 // intermediate states and should contain the parent's state trie.
@@ -478,9 +486,18 @@ func InitAmsterdamPreDeploys(db kv.TemporalRwDB, config *chain.Config, logger lo
 // Blocks created by GenerateChain do not contain valid proof of work
 // values. Inserting them into BlockChain requires use of FakePow or
 // a similar non-validating proof of work implementation.
-func GenerateChain(config *chain.Config, parent *types.Block, engine rules.Engine, db kv.TemporalRoDB, n int, gen func(int, *BlockGen)) (*ChainPack, error) {
+//
+// A finalizer passed here runs before the state root is known. It must
+// implement PreSealFinalizer: recording a table against b.header.Hash() at
+// this point would cache a pre-root hash, so the generator intentionally has
+// no fallback for the regular BlockFinalizer shape.
+func GenerateChain(config *chain.Config, parent *types.Block, engine rules.Engine, db kv.TemporalRoDB, n int, gen func(int, *BlockGen), finalizers ...protocol.BlockFinalizer) (*ChainPack, error) {
 	if config == nil {
 		config = chain.AllProtocolChanges
+	}
+	finalizer, err := validatePreSealFinalizers(finalizers)
+	if err != nil {
+		return nil, err
 	}
 	headers, blocks, receipts := make([]*types.Header, n), make(types.Blocks, n), make([]types.Receipts, n)
 	chainreader := &FakeChainReader{Cfg: config, current: parent}
@@ -615,6 +632,15 @@ func GenerateChain(config *chain.Config, parent *types.Block, engine rules.Engin
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("call to FinaliseAndAssemble: %w", err)
 			}
+			if finalizer != nil {
+				// The finalizer must run before ComputeCommitment because its
+				// system-call writes are part of the state transition. The sealed
+				// block hash does not exist yet, so this hook deliberately has no
+				// hash argument and must not call Header.Hash().
+				if err := finalizer.(PreSealFinalizer).FinalizePreSeal(b.header.Number.Uint64(), b.header.Time, b.header.ParentHash, b.receipts, syscall); err != nil {
+					return nil, nil, nil, fmt.Errorf("finalize EIP-8304 tables: %w", err)
+				}
+			}
 			// Record finalize system call I/O into blockIO for BAL computation
 			if ibs.IsVersioned() && b.blockIO != nil {
 				finalizeVersion := state.Version{BlockNum: b.header.Number.Uint64(), TxIndex: len(b.txs)}
@@ -723,6 +749,20 @@ func GenerateChain(config *chain.Config, parent *types.Block, engine rules.Engin
 	}
 
 	return &ChainPack{Headers: headers, Blocks: blocks, Receipts: receipts, BlockAccessLists: blockAccessLists, TopBlock: blocks[n-1]}, nil
+}
+
+func validatePreSealFinalizers(finalizers []protocol.BlockFinalizer) (protocol.BlockFinalizer, error) {
+	if len(finalizers) > 1 {
+		return nil, fmt.Errorf("block generation accepts at most one finalizer, got %d", len(finalizers))
+	}
+	if len(finalizers) == 0 {
+		return nil, nil
+	}
+	finalizer := finalizers[0]
+	if _, ok := finalizer.(PreSealFinalizer); !ok {
+		return nil, fmt.Errorf("block generation finalizer %T must implement PreSealFinalizer", finalizer)
+	}
+	return finalizer, nil
 }
 
 func makeHeader(chain rules.ChainReader, parent *types.Block, state *state.IntraBlockState, engine rules.Engine) *types.Header {

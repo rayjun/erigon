@@ -241,6 +241,7 @@ func applyRemainingEthFlags(ctx *cli.Command, cfg *ethconfig.Config, logger log.
 	distance := mustDistance(prune.ParseHistoryDistance(ctx.String(PruneDistanceFlag.Name), PruneDistanceFlag.Name))
 
 	cfg.PersistReceiptsCacheV2 = ctx.Bool(utils.PersistReceiptsV2Flag.Name)
+	setEip8304Config(cfg, ctx.String(utils.Eip8304IndexContractFlag.Name), ctx.Uint64(utils.Eip8304ListLimitFlag.Name))
 
 	commitmentHistoryOlder := mustDistance(prune.ParseCommitmentHistoryDistance(ctx.String(utils.CommitmentHistoryDistanceFlag.Name), utils.CommitmentHistoryDistanceFlag.Name))
 	receiptsDistance := mustDistance(prune.ParseReceiptsDistance(ctx.String(utils.PersistReceiptsDistanceFlag.Name), utils.PersistReceiptsDistanceFlag.Name))
@@ -364,6 +365,7 @@ func ApplyFlagsForEthConfigCobra(f *pflag.FlagSet, cfg *ethconfig.Config) {
 
 	cfg.StateStream = !cobraBoolValueOrDefault(f, StateStreamDisableFlag.Name, StateStreamDisableFlag.Value)
 	cfg.ExperimentalBAL = cobraBoolValueOrDefault(f, ExperimentalBALFlag.Name, ExperimentalBALFlag.Value)
+	setEip8304Config(cfg, cobraStringValueOrDefault(f, utils.Eip8304IndexContractFlag.Name, ""), cobraUint64ValueOrDefault(f, utils.Eip8304ListLimitFlag.Name, 0))
 
 	if cobraBoolValueOrDefault(f, utils.ChaosMonkeyFlag.Name, utils.ChaosMonkeyFlag.Value) {
 		cfg.ChaosMonkey = true
@@ -390,6 +392,43 @@ func cobraBoolValueOrDefault(f *pflag.FlagSet, name string, fallback bool) bool 
 		utils.Fatalf("failed to read --%s: %v", name, err)
 	}
 	return v
+}
+
+func cobraUint64ValueOrDefault(f *pflag.FlagSet, name string, fallback uint64) uint64 {
+	if f.Lookup(name) == nil {
+		return fallback
+	}
+	v, err := f.GetUint64(name)
+	if err != nil {
+		utils.Fatalf("failed to read --%s: %v", name, err)
+	}
+	return v
+}
+
+func setEip8304Config(cfg *ethconfig.Config, rawIndex string, listLimit uint64) {
+	addr, limit, err := parseEip8304Config(rawIndex, listLimit)
+	if err != nil {
+		utils.Fatalf("%v", err)
+	}
+	if addr == nil {
+		return
+	}
+	cfg.Eip8304IndexContract = addr
+	cfg.Eip8304ListLimit = limit
+}
+
+func parseEip8304Config(rawIndex string, listLimit uint64) (*common.Address, uint64, error) {
+	if rawIndex == "" && listLimit == 0 {
+		return nil, 0, nil
+	}
+	if rawIndex == "" || listLimit == 0 {
+		return nil, 0, fmt.Errorf("--%s and --%s must be set together", utils.Eip8304IndexContractFlag.Name, utils.Eip8304ListLimitFlag.Name)
+	}
+	if !common.IsHexAddress(rawIndex) {
+		return nil, 0, fmt.Errorf("invalid --%s: %q", utils.Eip8304IndexContractFlag.Name, rawIndex)
+	}
+	addr := common.HexToAddress(rawIndex)
+	return &addr, listLimit, nil
 }
 
 // mustDistance fatals on a prune-distance parse error and returns the value.

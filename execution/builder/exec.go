@@ -141,11 +141,16 @@ func execBlock(ctx context0.Context, sd *execctx.SharedDomains, tx kv.TemporalTx
 	ibs.SetTxContext(current.Header.Number.Uint64(), -1)
 
 	current.PayloadId = cfg.payloadId
+	finalizer, err := execCfg.NewEip8304Finalizer(ctx, sd, tx, false)
+	if err != nil {
+		return err
+	}
 	ba := exec.NewBlockAssembler(exec.AssemblerCfg{
 		ChainConfig:     cfg.chainConfig,
 		Engine:          cfg.engine,
 		BlockReader:     cfg.blockReader,
 		ExperimentalBAL: execCfg.IsExperimentalBAL(),
+		Finalizer:       finalizer,
 	}, current)
 	ba.SetStateWriter(stateWriter)
 

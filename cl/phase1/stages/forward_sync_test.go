@@ -17,7 +17,13 @@
 package stages
 
 import (
+	"context"
+	"errors"
 	"testing"
+
+	"github.com/erigontech/erigon/cl/cltypes"
+	network2 "github.com/erigontech/erigon/cl/phase1/network"
+	"github.com/stretchr/testify/require"
 )
 
 // currentSlot can overshoot the captured chainTipSlot; slotsRemaining must clamp
@@ -53,4 +59,92 @@ func TestForwardSyncProgress_Normal(t *testing.T) {
 	if ratePerSec != 10 { // (900000-899700)/30
 		t.Fatalf("ratePerSec = %g, want 10", ratePerSec)
 	}
+}
+
+type recordingBlockCollector struct {
+	flushes int
+	err     error
+}
+
+func (c *recordingBlockCollector) AddBlock(*cltypes.BeaconBlock) error { return nil }
+func (c *recordingBlockCollector) AddGloasBlock(*cltypes.BeaconBlock, *cltypes.SignedExecutionPayloadEnvelope) error {
+	return nil
+}
+func (c *recordingBlockCollector) HasBlock(uint64) bool { return false }
+func (c *recordingBlockCollector) Flush(context.Context) error {
+	c.flushes++
+	return c.err
+}
+
+func TestFlushForwardSyncBlocksCommitsAtBatchBoundary(t *testing.T) {
+	collector := &recordingBlockCollector{}
+	cfg := &Cfg{blockCollector: collector}
+
+	require.NoError(t, flushForwardSyncBlocks(context.Background(), cfg))
+	require.Equal(t, 1, collector.flushes)
+}
+
+func TestFlushForwardSyncBlocksPropagatesFailure(t *testing.T) {
+	flushErr := errors.New("execution insert failed")
+	collector := &recordingBlockCollector{err: flushErr}
+	cfg := &Cfg{blockCollector: collector}
+
+	err := flushForwardSyncBlocks(context.Background(), cfg)
+	require.ErrorIs(t, err, flushErr)
+	require.Equal(t, 1, collector.flushes)
+}
+
+func TestProcessForwardSyncBatchFlushesBeforeAdvancingProgress(t *testing.T) {
+	collector := &recordingBlockCollector{}
+	cfg := &Cfg{blockCollector: collector}
+
+	got, err := processForwardSyncBatch(context.Background(), cfg, true, 3, func() (uint64, error) {
+		return 9, nil
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, uint64(9), got)
+	require.Equal(t, 1, collector.flushes)
+}
+
+func TestProcessForwardSyncBatchSkipsFlushWithoutInsertion(t *testing.T) {
+	collector := &recordingBlockCollector{}
+	cfg := &Cfg{blockCollector: collector}
+
+	got, err := processForwardSyncBatch(context.Background(), cfg, false, 3, func() (uint64, error) {
+		return 9, nil
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, uint64(9), got)
+	require.Zero(t, collector.flushes)
+}
+
+func TestProcessForwardSyncBatchReturnsInitialProgressOnFlushFailure(t *testing.T) {
+	flushErr := errors.New("execution insert failed")
+	collector := &recordingBlockCollector{err: flushErr}
+	cfg := &Cfg{blockCollector: collector}
+
+	got, err := processForwardSyncBatch(context.Background(), cfg, true, 3, func() (uint64, error) {
+		return 9, nil
+	})
+
+	require.ErrorIs(t, err, flushErr)
+	require.ErrorIs(t, err, network2.ErrDoNotBanPeer)
+	require.Equal(t, uint64(3), got)
+	require.Equal(t, 1, collector.flushes)
+}
+
+func TestProcessForwardSyncBatchPreservesProcessFailure(t *testing.T) {
+	processErr := errors.New("invalid block")
+	collector := &recordingBlockCollector{}
+	cfg := &Cfg{blockCollector: collector}
+
+	got, err := processForwardSyncBatch(context.Background(), cfg, true, 3, func() (uint64, error) {
+		return 9, processErr
+	})
+
+	require.ErrorIs(t, err, processErr)
+	require.Equal(t, uint64(3), got)
+	require.Equal(t, 1, collector.flushes)
 }

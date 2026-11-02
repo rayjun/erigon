@@ -1,6 +1,7 @@
 package eip8304
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -54,9 +55,10 @@ var (
 	ErrTableRecordTooLarge = errors.New("eip8304: table store record exceeds the SSZ list limit")
 	ErrTableRecordProgress = errors.New("eip8304: table store record covers blocks above the executed height")
 
-	ErrNilTableStoreTx   = errors.New("eip8304: nil table store transaction")
-	ErrNilCanonicalData  = errors.New("eip8304: nil canonical data source")
-	ErrNilProgressSource = errors.New("eip8304: nil execution progress source")
+	ErrNilTableStoreTx    = errors.New("eip8304: nil table store transaction")
+	ErrNilCanonicalData   = errors.New("eip8304: nil canonical data source")
+	ErrNilProgressSource  = errors.New("eip8304: nil execution progress source")
+	ErrReadOnlyTableStore = errors.New("eip8304: read-only table store")
 )
 
 // ExecutionProgress reports the highest block this node has fully executed. A
@@ -79,10 +81,22 @@ func (f ProgressFunc) ExecutedHeight() (uint64, error) { return f() }
 // together with the state change it belongs to: if the block is aborted, the
 // record is rolled back with everything else.
 type HotTableStore struct {
-	tx        kv.RwTx
+	reads     kv.Tx
+	writes    kv.RwTx
 	canonical CanonicalData
 	progress  ExecutionProgress
 	listLimit uint64
+	// pending makes records written in this transaction visible immediately.
+	// The staged-sync execution progress advances only at the batch boundary,
+	// so a table for a block executed moments ago would otherwise be rejected as
+	// "above the executed height" and forced through a rebuild that cannot see
+	// the uncommitted canonical hashes yet.
+	pending map[TableRef]pendingTable
+}
+
+type pendingTable struct {
+	raw    []byte
+	result TableResult
 }
 
 var _ TableStore = (*HotTableStore)(nil)
@@ -101,10 +115,34 @@ func NewHotTableStore(tx kv.RwTx, canonical CanonicalData, progress ExecutionPro
 		return nil, ErrNilProgressSource
 	}
 	return &HotTableStore{
-		tx:        tx,
+		reads:     tx,
+		writes:    tx,
 		canonical: canonical,
 		progress:  progress,
 		listLimit: listLimit,
+		pending:   make(map[TableRef]pendingTable),
+	}, nil
+}
+
+// NewHotTableReader returns the read side of a hot table store over tx. It is
+// used by block building, where the state transaction is read-only and the
+// sealed block hash is not known yet, so table records must not be written.
+func NewHotTableReader(tx kv.Tx, canonical CanonicalData, progress ExecutionProgress, listLimit uint64) (*HotTableStore, error) {
+	if tx == nil {
+		return nil, ErrNilTableStoreTx
+	}
+	if canonical == nil {
+		return nil, ErrNilCanonicalData
+	}
+	if progress == nil {
+		return nil, ErrNilProgressSource
+	}
+	return &HotTableStore{
+		reads:     tx,
+		canonical: canonical,
+		progress:  progress,
+		listLimit: listLimit,
+		pending:   make(map[TableRef]pendingTable),
 	}, nil
 }
 
@@ -124,7 +162,7 @@ func (s *HotTableStore) GetTable(ref TableRef) (TableResult, bool, error) {
 	if err := validateTableRef(ref); err != nil {
 		return TableResult{}, false, err
 	}
-	raw, err := s.tx.GetOne(kv.Eip8304Tables, hotStoreKey(ref))
+	raw, err := s.reads.GetOne(kv.Eip8304Tables, hotStoreKey(ref))
 	if err != nil {
 		return TableResult{}, false, fmt.Errorf("read table %+v: %w", ref, err)
 	}
@@ -140,6 +178,13 @@ func (s *HotTableStore) GetTable(ref TableRef) (TableResult, bool, error) {
 		return TableResult{}, false, fmt.Errorf("execution progress: %w", err)
 	}
 	if end := ref.FirstBlock + ref.TableSize - 1; end > progress {
+		// The staged-sync progress advances at a batch boundary, after the
+		// finalizer has already written this transaction's table. Accept that
+		// record only while the bytes still match what this store wrote; a
+		// later direct rewrite, damage or delete must remain visible.
+		if pending, ok := s.pending[ref]; ok && bytes.Equal(pending.raw, raw) {
+			return pending.result, true, nil
+		}
 		return TableResult{}, false, fmt.Errorf("%w: %+v covers block %d, executed height %d", ErrTableRecordProgress, ref, end, progress)
 	}
 	return result, true, nil
@@ -153,14 +198,38 @@ func (s *HotTableStore) GetTable(ref TableRef) (TableResult, bool, error) {
 // rather than stored: it would be served back as this table's root, and a
 // checksum cannot tell it apart from a correct record.
 func (s *HotTableStore) PutTable(result TableResult) error {
+	if s.writes == nil {
+		return ErrReadOnlyTableStore
+	}
+	if err := validateTableResult(result, s.listLimit); err != nil {
+		return err
+	}
+
+	raw := encodeTableRecord(result)
+	if err := s.writes.Put(kv.Eip8304Tables, hotStoreKey(result.Ref), raw); err != nil {
+		return fmt.Errorf("write table %+v: %w", result.Ref, err)
+	}
+	s.pending[result.Ref] = pendingTable{raw: raw, result: result}
+	if newest := result.Ref.FirstBlock + result.Ref.TableSize - 1; newest > MaxTableLookback {
+		keepFrom := newest - MaxTableLookback
+		for ref := range s.pending {
+			if ref.FirstBlock+ref.TableSize-1 < keepFrom {
+				delete(s.pending, ref)
+			}
+		}
+	}
+	return nil
+}
+
+func validateTableResult(result TableResult, listLimit uint64) error {
 	if err := validateTableRef(result.Ref); err != nil {
 		return err
 	}
 	if result.EntryCount != uint64(len(result.Entries)) {
 		return fmt.Errorf("%w: entry_count %d, %d entries", ErrTableEntryCount, result.EntryCount, len(result.Entries))
 	}
-	if result.EntryCount > s.listLimit {
-		return fmt.Errorf("%w: %d entries, limit %d", ErrTableRecordTooLarge, result.EntryCount, s.listLimit)
+	if result.EntryCount > listLimit {
+		return fmt.Errorf("%w: %d entries, limit %d", ErrTableRecordTooLarge, result.EntryCount, listLimit)
 	}
 	if uint64(len(result.BlockHashes)) != result.Ref.TableSize {
 		return fmt.Errorf("%w: %d hashes for table_size %d", ErrTableCoverageMismatch, len(result.BlockHashes), result.Ref.TableSize)
@@ -171,11 +240,6 @@ func (s *HotTableStore) PutTable(result TableResult) error {
 	if err := checkEntryBlocks(result.Entries, result.Ref); err != nil {
 		return err
 	}
-
-	raw := encodeTableRecord(result)
-	if err := s.tx.Put(kv.Eip8304Tables, hotStoreKey(result.Ref), raw); err != nil {
-		return fmt.Errorf("write table %+v: %w", result.Ref, err)
-	}
 	return nil
 }
 
@@ -183,7 +247,30 @@ func (s *HotTableStore) PutTable(result TableResult) error {
 // how many were removed. A table can only be needed while a future due table
 // can merge it, so callers pass a watermark derived from the retained range.
 func (s *HotTableStore) Prune(keepFrom uint64) (int, error) {
-	cursor, err := s.tx.RwCursor(kv.Eip8304Tables)
+	if s.writes == nil {
+		return 0, ErrReadOnlyTableStore
+	}
+	pruned, err := PruneHotTableRecords(s.writes, keepFrom)
+	if err != nil {
+		return pruned, err
+	}
+	for ref := range s.pending {
+		if ref.FirstBlock+ref.TableSize-1 < keepFrom {
+			delete(s.pending, ref)
+		}
+	}
+	return pruned, nil
+}
+
+// PruneHotTableRecords drops table records whose covered range ends before
+// keepFrom. It is the transaction-only form of HotTableStore.Prune, so staged
+// sync can reclaim the bucket without constructing canonical data or a full
+// execution store.
+func PruneHotTableRecords(tx kv.RwTx, keepFrom uint64) (int, error) {
+	if tx == nil {
+		return 0, ErrNilTableStoreTx
+	}
+	cursor, err := tx.RwCursor(kv.Eip8304Tables)
 	if err != nil {
 		return 0, fmt.Errorf("prune table store: %w", err)
 	}

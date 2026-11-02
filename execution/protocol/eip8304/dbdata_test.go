@@ -130,6 +130,58 @@ func TestNewDBDataRejectsMissingInputs(t *testing.T) {
 	}))
 }
 
+// TestReconcileHotTableStoreStartupAdapter exercises the node-facing wrapper:
+// startup must bind records to hashes already stored in the database, without
+// requiring a receipt source, and remove records above execution progress or
+// from a replaced fork.
+func TestReconcileHotTableStoreStartupAdapter(t *testing.T) {
+	require := require.New(t)
+	db := newFileDatadir(t)
+	chain := newTestChain(t, 16)
+	seedCanonicalChain(t, db, chain, 15)
+
+	keptRef := L0(0)
+	staleRef := L0(2)
+	aheadRef := L0(4)
+	require.NoError(db.Update(context.Background(), func(tx kv.RwTx) error {
+		store, err := NewHotTableStore(tx, chain, hotStoreTestProgress(15), hotStoreTestLimit)
+		if err != nil {
+			return err
+		}
+		for _, ref := range []TableRef{keptRef, staleRef, aheadRef} {
+			if err := store.PutTable(hotStoreSeed(t, chain, ref)); err != nil {
+				return err
+			}
+		}
+		return rawdb.WriteCanonicalHash(tx, testHash(102), 2)
+	}))
+
+	require.NoError(db.Update(context.Background(), func(tx kv.RwTx) error {
+		report, err := ReconcileHotTableStore(tx, 3, hotStoreTestLimit)
+		require.NoError(err)
+		require.Equal(3, report.Checked)
+		require.Equal(1, report.Kept)
+		require.Equal(1, report.DroppedAhead)
+		require.Equal(1, report.DroppedStale)
+		require.Equal(0, report.DroppedDamaged)
+		require.True(report.HasRecords)
+		require.Equal(uint64(0), report.HighestCovered)
+
+		store, err := NewHotTableStore(tx, chain, hotStoreTestProgress(3), hotStoreTestLimit)
+		require.NoError(err)
+		_, ok, err := store.GetTable(keptRef)
+		require.NoError(err)
+		require.True(ok, "the valid record must survive the startup reconcile")
+		_, ok, err = store.GetTable(staleRef)
+		require.NoError(err)
+		require.False(ok, "the record bound to a replaced fork must be dropped")
+		_, ok, err = store.GetTable(aheadRef)
+		require.NoError(err)
+		require.False(ok, "a record above executed progress must be dropped")
+		return nil
+	}))
+}
+
 // TestHotTableStoreRecoversOnARealDatadirRestart walks T3.2's acceptance case
 // on a file-backed datadir: a table is written, the database is closed and
 // reopened (a process restart), the record survives the restart check, a

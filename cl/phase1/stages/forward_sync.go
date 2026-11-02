@@ -281,6 +281,45 @@ func forwardSyncProgress(chainTipSlot, currentSlot, prevProgress uint64, secsPer
 	return
 }
 
+// flushForwardSyncBlocks commits the EL blocks collected while replaying a
+// forward-sync batch. Without this boundary, a restarted follower can advance
+// its CL fork-choice graph through blocks that the execution layer has not
+// inserted yet; the next gossip block then fails with a missing parent.
+func flushForwardSyncBlocks(ctx context.Context, cfg *Cfg) error {
+	if cfg == nil || cfg.blockCollector == nil {
+		return nil
+	}
+	if err := cfg.blockCollector.Flush(ctx); err != nil {
+		return fmt.Errorf("failed to flush forward-sync execution blocks: %w", err)
+	}
+	return nil
+}
+
+// processForwardSyncBatch runs one downloader batch and commits the execution
+// blocks it produced before the downloader is allowed to advance its progress.
+// A Flush error is returned with the original progress so the same range is
+// retried; the collector keeps its uncommitted rows for that retry.
+func processForwardSyncBatch(
+	ctx context.Context,
+	cfg *Cfg,
+	shouldInsert bool,
+	initialHighestSlotProcessed uint64,
+	processBatch func() (uint64, error),
+) (uint64, error) {
+	highestSlotProcessed, processErr := processBatch()
+	if shouldInsert {
+		if flushErr := flushForwardSyncBlocks(ctx, cfg); flushErr != nil {
+			if processErr == nil {
+				processErr = fmt.Errorf("%w: %w", network2.ErrDoNotBanPeer, flushErr)
+			}
+		}
+	}
+	if processErr != nil {
+		return initialHighestSlotProcessed, processErr
+	}
+	return highestSlotProcessed, nil
+}
+
 // forwardSync (MAIN ROUTINE FOR ForwardSync) performs the forward synchronization of beacon blocks.
 func forwardSync(ctx context.Context, logger log.Logger, cfg *Cfg, args Args) error {
 	var (
@@ -324,7 +363,9 @@ func forwardSync(ctx context.Context, logger log.Logger, cfg *Cfg, args Args) er
 
 	// Set the function to process downloaded blocks
 	downloader.SetProcessFunction(func(initialHighestSlotProcessed uint64, blocks []*cltypes.SignedBeaconBlock, envelopes map[common.Hash]*cltypes.SignedExecutionPayloadEnvelope) (newHighestSlotProcessed uint64, err error) {
-		highestSlotProcessed, err := processDownloadedBlockBatches(ctx, logger, cfg, initialHighestSlotProcessed, shouldInsert, blocks, envelopes)
+		highestSlotProcessed, err := processForwardSyncBatch(ctx, cfg, shouldInsert, initialHighestSlotProcessed, func() (uint64, error) {
+			return processDownloadedBlockBatches(ctx, logger, cfg, initialHighestSlotProcessed, shouldInsert, blocks, envelopes)
+		})
 		if err != nil {
 			logger.Warn("[Caplin] Failed to process block batch", "err", err)
 			return initialHighestSlotProcessed, err

@@ -406,11 +406,18 @@ func (se *serialExecutor) executeBlock(ctx context.Context, tasks []exec.Task, i
 					receipts.DeriveFields(finalizeReceipts, txTask.BlockHash())
 				}
 
+				if se.eip8304Finalizer != nil && se.cfg.chainConfig.IsEip8304(txTask.Header.Time) && !priorComplete {
+					return fmt.Errorf("%w, txnIdx=%d, EIP-8304 needs complete receipts for partial block %d", rules.ErrInvalidBlock, txTask.TxIndex, txTask.BlockNumber())
+				}
+
 				_, err = se.cfg.engine.Finalize(
 					se.cfg.chainConfig, types.CopyHeader(txTask.Header), ibs, txTask.Uncles,
 					finalizeReceipts, txTask.Withdrawals, chainReader, syscall, false, se.logger)
 
 				if err != nil {
+					return fmt.Errorf("%w, txnIdx=%d, %w", rules.ErrInvalidBlock, txTask.TxIndex, err)
+				}
+				if err := se.finalizeEip8304(txTask.BlockNumber(), txTask.Header.Time, txTask.BlockHash(), txTask.ParentHash(), finalizeReceipts, syscall); err != nil {
 					return fmt.Errorf("%w, txnIdx=%d, %w", rules.ErrInvalidBlock, txTask.TxIndex, err)
 				}
 

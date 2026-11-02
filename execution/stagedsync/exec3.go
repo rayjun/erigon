@@ -108,6 +108,21 @@ func restoreTxNum(ctx context.Context, cfg *ExecuteBlockCfg, applyTx kv.Tx, curr
 	return inputTxNum, maxTxNum, offsetFromBlockBeginning, blockNum, nil
 }
 
+// exec3ExecutorRunCounts is process-wide and monotonic. Tests compare snapshots
+// before and after an execution and must not run concurrently with another
+// ExecV3 call.
+var exec3ExecutorRunCounts struct {
+	parallel atomic.Uint64
+	serial   atomic.Uint64
+}
+
+// Exec3ExecutorRunCounts reports how many times ExecV3 selected the parallel
+// and serial executors in this process. It is an observability hook for tests
+// that compare the two paths, not part of the execution algorithm.
+func Exec3ExecutorRunCounts() (parallel, serial uint64) {
+	return exec3ExecutorRunCounts.parallel.Load(), exec3ExecutorRunCounts.serial.Load()
+}
+
 func ExecV3(ctx context.Context,
 	execStage *StageState, u Unwinder, cfg ExecuteBlockCfg,
 	doms *execctx.SharedDomains, rwTx kv.TemporalRwTx,
@@ -123,6 +138,20 @@ func ExecV3(ctx context.Context,
 	initialTxNum, blockNum, err := doms.SeekCommitment(ctx, applyTx)
 	if err != nil {
 		return err
+	}
+	var eip8304Finalizer protocol.BlockFinalizer
+	if parallel {
+		// The parallel exec loop owns its own read transaction, and the apply
+		// loop owns rwTx. Build the read-side finalizer on the exec-loop
+		// goroutine instead of retaining rwTx here.
+		if err := cfg.ValidateEip8304FinalizeConfig(); err != nil {
+			return err
+		}
+	} else {
+		eip8304Finalizer, err = cfg.NewEip8304Finalizer(ctx, doms, rwTx, true)
+		if err != nil {
+			return err
+		}
 	}
 
 	if isApplyingBlocks {
@@ -218,6 +247,7 @@ func ExecV3(ctx context.Context,
 		defer clean()
 	}
 	if parallel {
+		exec3ExecutorRunCounts.parallel.Add(1)
 		pe := &parallelExecutor{
 			txExecutor: txExecutor{
 				cfg:               cfg,
@@ -230,6 +260,7 @@ func ExecV3(ctx context.Context,
 				progress:          NewProgress(blockNum, inputTxNum, commitThreshold, false, execStage.LogPrefix(), logger),
 				enableChaosMonkey: execStage.CurrentSyncCycle.IsInitialCycle,
 				hooks:             hooks,
+				eip8304Finalizer:  eip8304Finalizer,
 			},
 			workerCount: cfg.syncCfg.ExecWorkerCount,
 		}
@@ -253,6 +284,7 @@ func ExecV3(ctx context.Context,
 		lastCommittedBlockNum = pe.lastCommittedBlockNum.Load()
 		lastCommittedTxNum = pe.lastCommittedTxNum.Load()
 	} else {
+		exec3ExecutorRunCounts.serial.Add(1)
 		se := &serialExecutor{
 			txExecutor: txExecutor{
 				cfg:               cfg,
@@ -267,6 +299,7 @@ func ExecV3(ctx context.Context,
 				progress:          NewProgress(blockNum, inputTxNum, commitThreshold, false, execStage.LogPrefix(), logger),
 				enableChaosMonkey: execStage.CurrentSyncCycle.IsInitialCycle,
 				hooks:             hooks,
+				eip8304Finalizer:  eip8304Finalizer,
 			}}
 		se.lastCommittedTxNum.Store(inputTxNum)
 		se.lastCommittedBlockNum.Store(blockNum)
@@ -396,6 +429,7 @@ type txExecutor struct {
 	taskExecMetrics  *exec.WorkerMetrics
 	blockExecMetrics *blockExecMetrics
 	hooks            *tracing.Hooks
+	eip8304Finalizer protocol.BlockFinalizer
 
 	lastExecutedBlockNum  atomic.Int64
 	lastExecutedTxNum     atomic.Int64
@@ -418,6 +452,13 @@ type txExecutor struct {
 
 func (te *txExecutor) readState() *state.StateV3Buffered {
 	return te.rs
+}
+
+func (te *txExecutor) finalizeEip8304(block, blockTime uint64, blockHash, parentBlockHash common.Hash, receipts types.Receipts, syscall rules.SystemCall) error {
+	if te.eip8304Finalizer == nil {
+		return nil
+	}
+	return te.eip8304Finalizer.Finalize(block, blockTime, blockHash, parentBlockHash, receipts, syscall)
 }
 
 func (te *txExecutor) domains() *execctx.SharedDomains {

@@ -24,6 +24,17 @@ import (
 
 const maxGloasVerificationSweepPerCycle = 32
 
+// maxMissedBlocksPerRequest keeps catch-up requests below the peer's sustained
+// blocks-by-range rate limit. A two-second pause between requests then leaves
+// headroom instead of exhausting the token bucket on the first catch-up burst.
+const maxMissedBlocksPerRequest = 8
+
+// chainTipBlockRequestInterval paces backfill requests. The response channel is
+// buffered so it does not provide backpressure; without this delay a 25-second
+// chain-tip cycle can submit many identical 8-block requests and exhaust the
+// peer's token bucket before the first batch is processed.
+const chainTipBlockRequestInterval = 2 * time.Second
+
 func gloasVersionedHashes(blobCommitments *solid.ListSSZ[*cltypes.KZGCommitment]) ([]common.Hash, error) {
 	if blobCommitments == nil || blobCommitments.Len() == 0 {
 		return nil, nil
@@ -118,14 +129,18 @@ func fetchBlocksFromReqResp(ctx context.Context, cfg *Cfg, from uint64, count ui
 			return nil, ctx.Err()
 		default:
 		}
+		retryDelay := time.Second
 		if errors.Is(err, peers.ErrNoPeers) {
 			// Back off when no peers are available to avoid CPU-burning tight loops.
+			retryDelay = 2 * time.Second
 			log.Debug("[Caplin] no peers available, backing off before retrying block request", "from", from, "count", count)
-			select {
-			case <-time.After(2 * time.Second):
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
+		} else {
+			log.Debug("[Caplin] block request failed, backing off before retrying", "from", from, "count", count, "err", err)
+		}
+		select {
+		case <-time.After(retryDelay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
 		blocks, pid, err = cfg.rpc.SendBeaconBlocksByRangeReq(ctx, from, count)
 	}
@@ -156,21 +171,15 @@ func startFetchingBlocksMissedByGossipAfterSomeTime(ctx context.Context, cfg *Cf
 		return
 	}
 
-	// Continuously fetch and process blocks
+	// Continuously fetch and process blocks. cursor can move ahead of the
+	// highest seen block after an empty request window; this is what lets the
+	// capped requests scan past a gossip gap instead of asking for the same
+	// eight slots until the stage times out.
+	var cursor uint64
 	for {
-		// Calculate the range of blocks to fetch
 		highestSeen := cfg.forkChoice.HighestSeen()
-		var from uint64
-		if highestSeen >= 2 {
-			from = highestSeen - 2
-		}
 		currentSlot := cfg.ethClock.GetCurrentSlot()
-		var count uint64
-		if currentSlot >= from {
-			count = (currentSlot - from) + 4
-		} else {
-			count = 4
-		}
+		from, count := nextMissedBlockRange(highestSeen, currentSlot, cursor)
 
 		// Stop fetching if the highest seen block is greater than or equal to the target slot
 		if cfg.forkChoice.HighestSeen() >= args.targetSlot {
@@ -180,19 +189,59 @@ func startFetchingBlocksMissedByGossipAfterSomeTime(ctx context.Context, cfg *Cf
 		// Fetch blocks from the specified range
 		blocks, err := fetchBlocksFromReqResp(ctx, cfg, from, count)
 		if err != nil {
-			// Send error to the error channel and return
-			errCh <- err
+			select {
+			case errCh <- err:
+			case <-ctx.Done():
+			}
 			return
 		}
+		var fetched []*cltypes.SignedBeaconBlock
+		if blocks != nil {
+			fetched = blocks.Data
+		}
+		cursor = advanceMissedBlockRequestCursor(from, count, fetched)
 
-		// Send fetched blocks to the response channel or handle context cancellation
+		// Send fetched blocks to the response channel or handle context cancellation.
 		select {
 		case respCh <- blocks:
 		case <-ctx.Done():
 			return
-		case <-time.After(time.Second): // Take a short pause before the next iteration
+		}
+
+		// The channel is buffered, so writing to it does not wait for the listener.
+		// Pace explicitly to keep backfill below the receiver's block token budget.
+		select {
+		case <-time.After(chainTipBlockRequestInterval):
+		case <-ctx.Done():
+			return
 		}
 	}
+}
+
+func missedBlockRequestCount(currentSlot, from uint64) uint64 {
+	if currentSlot < from {
+		return 4
+	}
+	return min((currentSlot-from)+4, maxMissedBlocksPerRequest)
+}
+
+func nextMissedBlockRange(highestSeen, currentSlot, cursor uint64) (from, count uint64) {
+	var floor uint64
+	if highestSeen >= 2 {
+		floor = highestSeen - 2
+	}
+	from = max(floor, cursor)
+	if from > currentSlot {
+		from = currentSlot + 1
+	}
+	return from, missedBlockRequestCount(currentSlot, from)
+}
+
+func advanceMissedBlockRequestCursor(from, count uint64, blocks []*cltypes.SignedBeaconBlock) uint64 {
+	if len(blocks) == 0 {
+		return from + count
+	}
+	return max(from+1, blocks[len(blocks)-1].Block.Slot+1)
 }
 
 // listenToIncomingBlocksUntilANewBlockIsReceived listens for incoming blocks until a new block with a slot greater than or equal to the target slot is received.
@@ -727,7 +776,7 @@ func chainTipSync(ctx context.Context, logger log.Logger, cfg *Cfg, args Args) e
 		"requestedSlots", totalRequest,
 	)
 	respCh := make(chan *peers.PeeredObject[[]*cltypes.SignedBeaconBlock], 1024)
-	errCh := make(chan error)
+	errCh := make(chan error, 1)
 
 	// 25 seconds is a good timeout for this
 	ctx, cn := context.WithTimeout(ctx, 25*time.Second)

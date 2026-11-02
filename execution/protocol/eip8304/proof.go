@@ -24,13 +24,16 @@ const ProofFormatVersion uint8 = 1
 // Proof errors. Each names one way a proof can fail, so a caller can tell a
 // malformed artifact from a proof that does not match the table.
 var (
-	ErrProofVersion      = errors.New("eip8304: unsupported proof format version")
-	ErrProofCorrupt      = errors.New("eip8304: corrupt proof encoding")
-	ErrProofQuery        = errors.New("eip8304: invalid proof query")
-	ErrProofEntry        = errors.New("eip8304: proof leaf is not a canonical entry")
-	ErrProofCoverage     = errors.New("eip8304: proof does not cover the list or the queried range")
-	ErrProofBoundary     = errors.New("eip8304: proof boundaries do not bound the queried key")
-	ErrProofRootMismatch = errors.New("eip8304: proof does not recompute the table root")
+	ErrProofVersion       = errors.New("eip8304: unsupported proof format version")
+	ErrProofCorrupt       = errors.New("eip8304: corrupt proof encoding")
+	ErrProofQuery         = errors.New("eip8304: invalid proof query")
+	ErrProofQueryMismatch = errors.New("eip8304: proof answers a different query")
+	ErrQueryIncomplete    = errors.New("eip8304: proof does not completely answer the query")
+	ErrProofEntry         = errors.New("eip8304: proof leaf is not a canonical entry")
+	ErrProofCoverage      = errors.New("eip8304: proof does not cover the list or the queried range")
+	ErrProofBoundary      = errors.New("eip8304: proof boundaries do not bound the queried key")
+	ErrProofRootMismatch  = errors.New("eip8304: proof does not recompute the table root")
+	ErrProofRefMismatch   = errors.New("eip8304: proof is for a different table")
 )
 
 // ProofQuery is one condition over one bounded block range: entries of type
@@ -147,9 +150,18 @@ func ProveTable(table TableResult, query ProofQuery, limit uint64) (TableProof, 
 		return TableProof{}, err
 	}
 	if len(table.Entries) == 0 {
-		return TableProof{}, fmt.Errorf("%w: table has no entries", ErrProofCoverage)
+		proof := TableProof{
+			Version:    ProofFormatVersion,
+			Ref:        table.Ref,
+			EntryCount: 0,
+			Root:       table.Root,
+			Query:      query,
+		}
+		if err := VerifyTableProof(proof, limit); err != nil {
+			return TableProof{}, fmt.Errorf("generated empty proof does not verify: %w", err)
+		}
+		return proof, nil
 	}
-
 	keys := make([]EncodedEntry, len(table.Entries))
 	hashes := make([]common.Hash, len(table.Entries))
 	for i, entry := range table.Entries {
@@ -207,45 +219,93 @@ func searchKeys(keys []EncodedEntry, bound []byte, strict bool) int {
 	})
 }
 
-// VerifyTableProof recomputes the table root from the revealed leaves and
-// siblings and then classifies them against the query's key interval, so the
-// matching run is exactly the leaves inside it. It reads nothing but the proof
-// and the SSZ list bound, and it checks the root the proof claims rather than a
-// root from the chain, which the caller supplies.
+// VerifyTableProof verifies a proof against the root and reference it carries.
+// It is the generator's self-check; callers verifying an untrusted proof should
+// use VerifyQueryProof, which takes the expected table and storage binding as
+// explicit inputs.
 func VerifyTableProof(proof TableProof, limit uint64) error {
+	_, err := verifyTableProofAgainst(proof, proof.Ref, proof.Root, proof.Query, limit)
+	return err
+}
+
+// verifyTableProofAgainst recomputes the table root from the revealed leaves
+// and siblings and then classifies them against the query's key interval, so
+// the matching run is exactly the leaves inside it. ProofValid covers the
+// version, expected table, entry encodings, Merkle fold and expected root;
+// QueryComplete additionally covers the expected query, the run that answers
+// it, and its existing neighbours. A proof can therefore be valid while it
+// answers a different or incomplete query.
+func verifyTableProofAgainst(
+	proof TableProof,
+	expectedRef TableRef,
+	expectedRoot common.Hash,
+	expectedQuery ProofQuery,
+	limit uint64,
+) (QueryVerdict, error) {
+	var verdict QueryVerdict
 	if proof.Version != ProofFormatVersion {
-		return fmt.Errorf("%w: %d", ErrProofVersion, proof.Version)
+		return verdict, fmt.Errorf("%w: %d", ErrProofVersion, proof.Version)
 	}
-	if err := validateTableRef(proof.Ref); err != nil {
-		return err
+	if err := validateTableRef(expectedRef); err != nil {
+		return verdict, err
 	}
-	if err := proof.Query.validate(proof.Ref); err != nil {
-		return err
+	if proof.Ref != expectedRef {
+		return verdict, fmt.Errorf("%w: have %+v, want %+v", ErrProofRefMismatch, proof.Ref, expectedRef)
 	}
-	if proof.EntryCount == 0 || proof.EntryCount > limit {
-		return fmt.Errorf("%w: entry_count %d, limit %d", ErrProofCoverage, proof.EntryCount, limit)
+	if err := expectedQuery.validate(expectedRef); err != nil {
+		return verdict, err
+	}
+	if proof.Root != expectedRoot {
+		return verdict, fmt.Errorf("%w: have %x, want %x", ErrProofRootMismatch, proof.Root, expectedRoot)
+	}
+	if err := proof.Query.validate(expectedRef); err != nil {
+		return verdict, err
+	}
+	if proof.EntryCount > limit {
+		return verdict, fmt.Errorf("%w: entry_count %d, limit %d", ErrProofCoverage, proof.EntryCount, limit)
+	}
+	if proof.EntryCount == 0 {
+		// A genesis table with no transactions is a legal empty SSZ list. Its
+		// proof reveals nothing, has no siblings, and is complete for every
+		// query that is valid for the table's block range.
+		if proof.Start != 0 || len(proof.Leaves) != 0 || proof.MatchStart != 0 || proof.MatchCount != 0 || len(proof.Siblings) != 0 {
+			return verdict, fmt.Errorf("%w: empty table proof has range or siblings", ErrProofCoverage)
+		}
+		root, err := ListHashRoot(nil, limit)
+		if err != nil {
+			return verdict, err
+		}
+		if root != expectedRoot {
+			return verdict, fmt.Errorf("%w: have %x, want empty root %x", ErrProofRootMismatch, expectedRoot, root)
+		}
+		verdict.ProofValid = true
+		if proof.Query != expectedQuery {
+			return verdict, fmt.Errorf("%w: have %+v, want %+v", ErrProofQueryMismatch, proof.Query, expectedQuery)
+		}
+		verdict.QueryComplete = true
+		return verdict, nil
 	}
 	leaves := uint64(len(proof.Leaves))
-	if leaves == 0 || proof.Start+leaves > proof.EntryCount {
-		return fmt.Errorf("%w: leaves [%d, %d) of %d", ErrProofCoverage, proof.Start, proof.Start+leaves, proof.EntryCount)
+	if leaves == 0 || proof.Start >= proof.EntryCount || leaves > proof.EntryCount-proof.Start {
+		return verdict, fmt.Errorf("%w: %d leaves at start %d of %d", ErrProofCoverage, leaves, proof.Start, proof.EntryCount)
 	}
 	if proof.MatchStart > proof.EntryCount || proof.MatchCount > proof.EntryCount-proof.MatchStart {
-		return fmt.Errorf("%w: match [%d, %d) of %d", ErrProofCoverage, proof.MatchStart, proof.MatchStart+proof.MatchCount, proof.EntryCount)
+		return verdict, fmt.Errorf("%w: match [%d, %d) of %d", ErrProofCoverage, proof.MatchStart, proof.MatchStart+proof.MatchCount, proof.EntryCount)
 	}
 
-	low, high := coveredBlockWindow(proof.Ref)
+	low, high := coveredBlockWindow(expectedRef)
 	keys := make([][]byte, leaves)
 	hashes := make([]common.Hash, leaves)
 	for i, raw := range proof.Leaves {
 		entry, size, err := DecodeEntry(raw)
 		if err != nil {
-			return fmt.Errorf("%w: leaf %d: %w", ErrProofEntry, i, err)
+			return verdict, fmt.Errorf("%w: leaf %d: %w", ErrProofEntry, i, err)
 		}
 		if size != len(raw) {
-			return fmt.Errorf("%w: leaf %d has %d trailing bytes", ErrProofEntry, i, len(raw)-size)
+			return verdict, fmt.Errorf("%w: leaf %d has %d trailing bytes", ErrProofEntry, i, len(raw)-size)
 		}
 		if entry.block < low || entry.block > high {
-			return fmt.Errorf("%w: leaf %d is for block %d, outside [%d, %d] of %+v", ErrProofCoverage, i, entry.block, low, high, proof.Ref)
+			return verdict, fmt.Errorf("%w: leaf %d is for block %d, outside [%d, %d] of %+v", ErrProofCoverage, i, entry.block, low, high, expectedRef)
 		}
 		keys[i] = raw
 		hashes[i] = raw.LeafHash()
@@ -253,14 +313,23 @@ func VerifyTableProof(proof TableProof, limit uint64) error {
 
 	contents, err := reduceProof(hashes, proof.Start, proof.Siblings, listDepth(limit))
 	if err != nil {
-		return err
+		return verdict, err
 	}
 	root := listRootFromContents(contents, proof.EntryCount)
-	if root != proof.Root {
-		return fmt.Errorf("%w: have %x, want %x", ErrProofRootMismatch, proof.Root, root)
+	if root != expectedRoot {
+		return verdict, fmt.Errorf("%w: have %x, want %x", ErrProofRootMismatch, expectedRoot, root)
+	}
+	verdict.ProofValid = true
+
+	if proof.Query != expectedQuery {
+		return verdict, fmt.Errorf("%w: have %+v, want %+v", ErrProofQueryMismatch, proof.Query, expectedQuery)
 	}
 
-	return checkProofQuery(proof, keys)
+	if err := checkProofQuery(proof, keys); err != nil {
+		return verdict, fmt.Errorf("%w: %w", ErrQueryIncomplete, err)
+	}
+	verdict.QueryComplete = true
+	return verdict, nil
 }
 
 // checkProofQuery classifies every revealed leaf against the query's key

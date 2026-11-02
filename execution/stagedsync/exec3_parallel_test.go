@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/holiman/uint256"
+	"github.com/jinzhu/copier"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -1621,6 +1622,66 @@ func TestParallelResumeReconstructionFailureIsNonFatal(t *testing.T) {
 	assert.NoError(err)
 	if assert.NotNil(res) {
 		assert.False(res.receiptsComplete)
+	}
+}
+
+func TestParallelResumeReconstructionFailureFailsClosedWhenEip8304IsActive(t *testing.T) {
+	assert := assert.New(t)
+	db := newResumeTestDB(t)
+
+	zero := uint64(0)
+	var config chain.Config
+	require.NoError(t, copier.CopyWithOption(&config, chain.TestChainBerlinConfig, copier.Option{DeepCopy: true}))
+	config.Eip8304Time = &zero
+	tx0 := signSelfSendTx(t, 0, 0, 1, 21000, &config, 0)
+	tx1 := signSelfSendTx(t, 1, 0, 1, 21000, &config, 0)
+
+	// No funded sender: the prefix replay fails, leaving only the suffix
+	// receipts. With EIP-8304 active, publishing an L0 root from that truncated
+	// set would be consensus-wrong, so the block must fail closed.
+	seedResumeTestDB(t, db, func(putter kv.TemporalPutDel) error {
+		return rawtemporaldb.AppendReceipt(putter, 0, 21000, 0, 1)
+	})
+
+	txTask := &exec.TxTask{
+		Header: &types.Header{
+			Number:   *uint256.NewInt(1),
+			GasLimit: 10_000_000,
+		},
+		TxNum:   2,
+		TxIndex: 1,
+		Config:  &config,
+		Txs:     []types.Transaction{tx0, tx1},
+	}
+
+	pe, roTx := newResumeTestExec(t, db, &config)
+	pe.cfg.eip8304Finalize = &Eip8304FinalizeConfig{IndexContract: common.Address{1}, ListLimit: 1 << 12}
+
+	gasPool := new(protocol.GasPool).AddGas(10_000_000)
+	be := newBlockExec(1, common.Hash{}, gasPool, nil, make(chan applyResult, 4), nil, false, nil)
+	eTask := &execTask{Task: txTask, index: 0}
+	be.tasks = []*execTask{eTask}
+	be.results = []*execResult{nil}
+	be.execTasks.setInProgress(0)
+
+	txResult := &exec.TxResult{
+		Task: &taskVersion{
+			execTask: eTask,
+			version: state.Version{
+				BlockNum:    1,
+				TxIndex:     1,
+				Incarnation: 1,
+				TxNum:       2,
+			},
+		},
+		ExecutionResult: evmtypes.ExecutionResult{ReceiptGasUsed: 10000},
+	}
+
+	res, err := be.nextResult(context.Background(), pe, txResult, roTx)
+	assert.NoError(err)
+	if assert.NotNil(res) {
+		assert.ErrorIs(res.Err, rules.ErrInvalidBlock)
+		assert.Contains(res.Err.Error(), "needs complete receipts")
 	}
 }
 

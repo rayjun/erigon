@@ -31,6 +31,7 @@ import (
 	"github.com/erigontech/erigon/execution/commitment"
 	"github.com/erigontech/erigon/execution/exec"
 	"github.com/erigontech/erigon/execution/protocol"
+	"github.com/erigontech/erigon/execution/protocol/eip8304"
 	"github.com/erigontech/erigon/execution/protocol/rules"
 	"github.com/erigontech/erigon/execution/receipts"
 	"github.com/erigontech/erigon/execution/state"
@@ -132,6 +133,10 @@ type parallelExecutor struct {
 	// after the blockExecutors map went empty mid-batch, with no preceding
 	// blockResult to trigger the install at the rotation site below).
 	currentChangeSetBlock uint64
+	// eip8304Tables exposes tables computed earlier in this batch to the next
+	// block's finalizer. The exec loop's read transaction cannot see records
+	// written later by the apply loop's rwTx.
+	eip8304Tables *eip8304.TableOverlay
 }
 
 // stopKind classifies why the executor was asked to stop. It maps directly
@@ -275,6 +280,7 @@ func (pe *parallelExecutor) execImpl(ctx context.Context, execStage *StageState,
 
 	// Set accumulator before pe.run() so execLoop sees it without a race.
 	pe.accumulator = accumulator
+	pe.eip8304Tables = eip8304.NewTableOverlay()
 
 	executorContext, executorCancel, err := pe.run(ctx)
 	defer executorCancel(nil)
@@ -385,6 +391,38 @@ func (pe *parallelExecutor) execImpl(ctx context.Context, execStage *StageState,
 			return fmt.Errorf("apply loop: open roTx: %w", err)
 		}
 		defer applyRoTx.Rollback()
+
+		// Table records are written after post-execution validation, by the
+		// goroutine that owns rwTx. The exec-loop finalizer only computes the
+		// roots and captures the records.
+		var eip8304TableWriter *eip8304.HotTableStore
+		persistEip8304Tables := func(tables []eip8304.TableResult) error {
+			if len(tables) == 0 {
+				return nil
+			}
+			if eip8304TableWriter == nil {
+				var err error
+				eip8304TableWriter, err = pe.cfg.NewEip8304TableWriter(ctx, pe.doms, rwTx)
+				if err != nil {
+					return fmt.Errorf("open EIP-8304 table writer: %w", err)
+				}
+				if eip8304TableWriter == nil {
+					return fmt.Errorf("EIP-8304 produced tables without a configured table writer")
+				}
+			}
+			for _, table := range tables {
+				if err := eip8304TableWriter.PutTable(table); err != nil {
+					// Capture already validated each record. A failure reaching this
+					// point is therefore a storage/write fault, not a block-validity
+					// verdict; keep it outside ErrInvalidBlock so a retry does not
+					// blacklist a valid block. Returning the error aborts the batch
+					// before the transaction commits, so partial table writes roll back
+					// with the state transition.
+					return fmt.Errorf("record EIP-8304 table %+v: %w", table.Ref, err)
+				}
+			}
+			return nil
+		}
 
 		// pe.changesetWindowStart and pe.currentChangeSet were set up
 		// before pe.run/executeBlocks launched their goroutines (above the
@@ -748,6 +786,11 @@ func (pe *parallelExecutor) execImpl(ctx context.Context, execStage *StageState,
 						continue
 					}
 
+					if err := persistEip8304Tables(applyResult.Tables); err != nil {
+						failInfra(err)
+						continue
+					}
+
 					isAmsterdam := pe.cfg.chainConfig.IsAmsterdam(applyResult.BlockTime)
 					if isAmsterdam || pe.cfg.experimentalBAL {
 						err = ProcessBAL(rwTx, lastHeader, applyResult.TxIO, isAmsterdam, pe.cfg.experimentalBAL, pe.cfg.dirs.DataDir, pe.logger)
@@ -973,8 +1016,9 @@ func (pe *parallelExecutor) execLoop(ctx context.Context) (err error) {
 	// closes commitResults then applyResults, causing the calculator
 	// and apply loop to drain and exit.
 	//
-	// Note: pe.applyTx is the stageloop's rwTx (externally supplied).
-	// Do NOT rollback it here — the stageloop owns its lifecycle.
+	// pe.applyTx is this loop's own read-only transaction. It is opened below
+	// when needed and rolled back by this loop's deferred cleanup; it is never
+	// the stageloop's thread-bound rwTx.
 
 	// The exec loop owns the workers' inner context: whatever exit path it takes
 	// (clean stop, wrong-root drain, error), the workers must not outlive it.
@@ -1728,6 +1772,7 @@ type blockResult struct {
 	ApplyCount       int
 	TxIO             *state.VersionedIO
 	Receipts         types.Receipts
+	Tables           []eip8304.TableResult
 	Stats            map[int]ExecutionStat
 	Deps             *state.DAG
 	AllDeps          map[int]map[int]bool
@@ -2992,6 +3037,7 @@ func (be *blockExecutor) nextResult(ctx context.Context, pe *parallelExecutor, r
 		// Block finalize: run engine.Finalize + MakeWriteSet on the producer
 		// side so finalize writes go to the BlockStateCache before the Flush.
 		var finalizeWrites *state.WriteSet
+		var tableResults []eip8304.TableResult
 		if be.blockNum > 0 {
 			lastResult := be.results[len(be.results)-1]
 			finalTask := be.tasks[len(be.tasks)-1].Task
@@ -3045,11 +3091,28 @@ func (be *blockExecutor) nextResult(ctx context.Context, pe *parallelExecutor, r
 					return ret, err
 				}
 
+				eipFinalizer, finalizerErr := pe.cfg.NewEip8304CapturingFinalizer(ctx, pe.doms, applyTx, pe.eip8304Tables)
+				if finalizerErr != nil {
+					return nil, finalizerErr
+				}
+				if eipFinalizer != nil && pe.cfg.chainConfig.IsEip8304(tt.Header.Time) && !receiptsComplete {
+					return be.invalidBlockResult(fmt.Errorf("%w: EIP-8304 needs complete receipts for partial block %d", rules.ErrInvalidBlock, be.blockNum)), nil
+				}
+
 				chainReader := consensuschain.NewReader(pe.cfg.chainConfig, applyTx, pe.cfg.blockReader, pe.logger)
 				if _, err := pe.cfg.engine.Finalize(
 					pe.cfg.chainConfig, types.CopyHeader(tt.Header), ibs, tt.Uncles, blockReceipts,
 					tt.Withdrawals, chainReader, syscall, false, pe.logger); err != nil {
 					return be.invalidBlockResult(fmt.Errorf("%w: can't finalize block %d: %v", rules.ErrInvalidBlock, be.blockNum, err)), nil
+				}
+				if eipFinalizer != nil {
+					if err := eipFinalizer.Finalize(be.blockNum, tt.Header.Time, be.blockHash, tt.ParentHash(), blockReceipts, syscall); err != nil {
+						return be.invalidBlockResult(fmt.Errorf("%w: can't finalize EIP-8304 at block %d: %v", rules.ErrInvalidBlock, be.blockNum, err)), nil
+					}
+					tableResults = eipFinalizer.TakeTableResults()
+					for _, table := range tableResults {
+						pe.eip8304Tables.Remember(table)
+					}
 				}
 
 				// syscallIBS == ibs unconditionally now; no separate write
@@ -3143,6 +3206,7 @@ func (be *blockExecutor) nextResult(ctx context.Context, pe *parallelExecutor, r
 			ApplyCount:       be.applyCount,
 			TxIO:             be.blockIO,
 			Receipts:         blockReceipts,
+			Tables:           tableResults,
 			receiptsComplete: receiptsComplete,
 			Stats:            be.stats,
 			Deps:             &deps,

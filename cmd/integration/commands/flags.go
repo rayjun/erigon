@@ -17,11 +17,15 @@
 package commands
 
 import (
+	"fmt"
+
 	"github.com/spf13/cobra"
 
 	"github.com/erigontech/erigon/cmd/utils"
+	"github.com/erigontech/erigon/common"
 	"github.com/erigontech/erigon/common/dbg"
 	"github.com/erigontech/erigon/db/state/statecfg"
+	"github.com/erigontech/erigon/execution/stagedsync"
 	"github.com/erigontech/erigon/node/cli"
 	"github.com/erigontech/erigon/node/ethconfig"
 )
@@ -64,6 +68,8 @@ var (
 	noHistory                       bool
 	erigondbDomainStepsInFrozenFile string
 	syncCfg                         = ethconfig.Defaults.Sync
+	eip8304IndexContract            string
+	eip8304ListLimit                uint64
 
 	convertSqueeze   bool
 	convertNibblesV2 bool
@@ -79,6 +85,27 @@ func must(err error) {
 
 func withConfig(cmd *cobra.Command) {
 	cmd.Flags().String("config", "", "yaml/toml config file location")
+}
+
+func withEip8304(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&eip8304IndexContract, utils.Eip8304IndexContractFlag.Name, "", utils.Eip8304IndexContractFlag.Usage)
+	cmd.Flags().Uint64Var(&eip8304ListLimit, utils.Eip8304ListLimitFlag.Name, 0, utils.Eip8304ListLimitFlag.Usage)
+}
+
+func eip8304FinalizeConfig() ([]stagedsync.Eip8304FinalizeConfig, error) {
+	if eip8304IndexContract == "" && eip8304ListLimit == 0 {
+		return nil, nil
+	}
+	if eip8304IndexContract == "" || eip8304ListLimit == 0 {
+		return nil, fmt.Errorf("--%s and --%s must be set together", utils.Eip8304IndexContractFlag.Name, utils.Eip8304ListLimitFlag.Name)
+	}
+	if !common.IsHexAddress(eip8304IndexContract) {
+		return nil, fmt.Errorf("invalid --%s: %q", utils.Eip8304IndexContractFlag.Name, eip8304IndexContract)
+	}
+	return []stagedsync.Eip8304FinalizeConfig{{
+		IndexContract: common.HexToAddress(eip8304IndexContract),
+		ListLimit:     eip8304ListLimit,
+	}}, nil
 }
 
 func withMining(cmd *cobra.Command) {

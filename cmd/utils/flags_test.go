@@ -141,6 +141,52 @@ func TestResolveChainName(t *testing.T) {
 	}
 }
 
+func TestDevnetGenesisTime(t *testing.T) {
+	run := func(args ...string) (uint64, error) {
+		genesisTimeFlag := DevGenesisTimeFlag
+		app := &cli.Command{}
+		app.Flags = []cli.Flag{&genesisTimeFlag}
+		var got uint64
+		var err error
+		app.Action = func(_ context.Context, ctx *cli.Command) error {
+			got, err = devnetGenesisTime(ctx)
+			return nil
+		}
+		require.NoError(t, app.Run(context.Background(), append([]string{"test"}, args...)))
+		return got, err
+	}
+
+	got, err := run()
+	require.NoError(t, err)
+	require.Greater(t, got, uint64(0), "the default must remain a current timestamp")
+
+	got, err = run("--dev.genesis-time=1800000000")
+	require.NoError(t, err)
+	require.Equal(t, uint64(1800000000), got)
+
+	_, err = run("--dev.genesis-time=0")
+	require.ErrorContains(t, err, "must be non-zero")
+}
+
+func TestDevnetValidatorSeedHonorsProposerDisable(t *testing.T) {
+	run := func(args ...string) string {
+		seedFlag := DevValidatorSeedFlag
+		proposerDisableFlag := ProposingDisableFlag
+		app := &cli.Command{}
+		app.Flags = []cli.Flag{&seedFlag, &proposerDisableFlag}
+		var got string
+		app.Action = func(_ context.Context, ctx *cli.Command) error {
+			got = devnetValidatorSeed(ctx, ctx.String(DevValidatorSeedFlag.Name))
+			return nil
+		}
+		require.NoError(t, app.Run(context.Background(), append([]string{"test"}, args...)))
+		return got
+	}
+
+	require.Equal(t, "devnet", run())
+	require.Empty(t, run("--proposer.disable"), "a follower must not start the embedded dev validator")
+}
+
 // TestExecPerfFlags_OverrideDbg verifies each --exec.* flag, when explicitly
 // set, flips the corresponding dbg package toggle. Also asserts the no-flag
 // path leaves dbg values untouched so env vars remain the source of truth.

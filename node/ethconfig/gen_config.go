@@ -45,6 +45,8 @@ func (c Config) MarshalTOML() (interface{}, error) {
 		RPCTxFeeCap                         float64 `toml:",omitempty"`
 		StateStream                         bool
 		ExperimentalBAL                     bool
+		Eip8304IndexContract                *common.Address `toml:",omitempty"`
+		Eip8304ListLimit                    uint64          `toml:",omitempty"`
 		HeimdallURL                         string
 		WithoutHeimdall                     bool
 		Ethstats                            string
@@ -86,6 +88,8 @@ func (c Config) MarshalTOML() (interface{}, error) {
 	enc.RPCTxFeeCap = c.RPCTxFeeCap
 	enc.StateStream = c.StateStream
 	enc.ExperimentalBAL = c.ExperimentalBAL
+	enc.Eip8304IndexContract = c.Eip8304IndexContract
+	enc.Eip8304ListLimit = c.Eip8304ListLimit
 	enc.HeimdallURL = c.HeimdallURL
 	enc.WithoutHeimdall = c.WithoutHeimdall
 	enc.Ethstats = c.Ethstats
@@ -131,6 +135,8 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 		RPCTxFeeCap                         *float64 `toml:",omitempty"`
 		StateStream                         *bool
 		ExperimentalBAL                     *bool
+		Eip8304IndexContract                *common.Address `toml:",omitempty"`
+		Eip8304ListLimit                    *uint64         `toml:",omitempty"`
 		HeimdallURL                         *string
 		WithoutHeimdall                     *bool
 		Ethstats                            *string
@@ -218,6 +224,12 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 	}
 	if dec.ExperimentalBAL != nil {
 		c.ExperimentalBAL = *dec.ExperimentalBAL
+	}
+	if dec.Eip8304IndexContract != nil {
+		c.Eip8304IndexContract = dec.Eip8304IndexContract
+	}
+	if dec.Eip8304ListLimit != nil {
+		c.Eip8304ListLimit = *dec.Eip8304ListLimit
 	}
 	if dec.HeimdallURL != nil {
 		c.HeimdallURL = *dec.HeimdallURL

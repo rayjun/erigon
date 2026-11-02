@@ -295,6 +295,15 @@ func WithoutExperimentalBAL() Option {
 	}
 }
 
+func WithEip8304Finalize(indexContract common.Address, listLimit uint64) Option {
+	return func(opts *options) {
+		opts.eip8304Finalize = &stagedsync.Eip8304FinalizeConfig{
+			IndexContract: indexContract,
+			ListLimit:     listLimit,
+		}
+	}
+}
+
 func WithGenesisSpec(gspec *types.Genesis) Option {
 	return func(opts *options) {
 		opts.genesis = gspec
@@ -353,6 +362,15 @@ func WithAlwaysGenerateChangesets(v bool) Option {
 	}
 }
 
+// WithReceiptsCache controls whether the tester persists the RCacheV2 receipt
+// cache. Setting it to false exercises readers that must replay receipts from
+// state history, as on nodes configured without the cache.
+func WithReceiptsCache(v bool) Option {
+	return func(opts *options) {
+		opts.receiptsCache = &v
+	}
+}
+
 // WithMaxReorgDepth pins syncCfg.MaxReorgDepth so the changeset window
 // (maxBlockNum-MaxReorgDepth) can be placed mid-batch — leaving earlier blocks
 // pre-window (BAL-fold candidates) and later blocks window (per-block changeset).
@@ -377,6 +395,7 @@ func WithSentryProtocol(protocol uint) Option {
 type options struct {
 	stepSize                 *uint64
 	experimentalBAL          bool
+	eip8304Finalize          *stagedsync.Eip8304FinalizeConfig
 	genesis                  *types.Genesis
 	chainConfig              *chain.Config
 	key                      *ecdsa.PrivateKey
@@ -387,6 +406,7 @@ type options struct {
 	fcuBackgroundCommit      bool
 	fcuBackgroundPrune       bool
 	alwaysGenerateChangesets *bool
+	receiptsCache            *bool
 	maxReorgDepth            *uint64
 	sentryProtocol           uint
 }
@@ -465,7 +485,15 @@ func New(tb testing.TB, opts ...Option) *ExecModuleTester {
 	if opt.maxReorgDepth != nil {
 		cfg.Sync.MaxReorgDepth = *opt.maxReorgDepth
 	}
+	if opt.eip8304Finalize != nil {
+		indexContract := opt.eip8304Finalize.IndexContract
+		cfg.Eip8304IndexContract = &indexContract
+		cfg.Eip8304ListLimit = opt.eip8304Finalize.ListLimit
+	}
 	cfg.PersistReceiptsCacheV2 = true
+	if opt.receiptsCache != nil {
+		cfg.PersistReceiptsCacheV2 = *opt.receiptsCache
+	}
 	cfg.ChaosMonkey = false
 	cfg.Snapshot.ChainName = gspec.Config.ChainName
 	cfg.Genesis = gspec
@@ -655,6 +683,10 @@ func New(tb testing.TB, opts ...Option) *ExecModuleTester {
 	}()
 
 	readAheader := exec.NewBlockReadAheader()
+	var eip8304Finalize []stagedsync.Eip8304FinalizeConfig
+	if opt.eip8304Finalize != nil {
+		eip8304Finalize = append(eip8304Finalize, *opt.eip8304Finalize)
+	}
 	blkBuilder := builder.NewBuilder(
 		mock.Ctx,
 		mock.DB,
@@ -678,6 +710,7 @@ func New(tb testing.TB, opts ...Option) *ExecModuleTester {
 			cfg.Sync,
 			false, /*experimentalBAL*/
 			readAheader,
+			eip8304Finalize...,
 		),
 		nil, /*notifier*/
 		&vm.Config{},
@@ -716,6 +749,7 @@ func New(tb testing.TB, opts ...Option) *ExecModuleTester {
 				cfg.Sync,
 				false, /*experimentalBAL*/
 				readAheader,
+				eip8304Finalize...,
 			),
 			stagedsync.StageTxLookupCfg(pruneMode, dirs.Tmp, mock.BlockReader),
 			stagedsync.StageFinishCfg(),

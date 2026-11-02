@@ -250,6 +250,12 @@ type Config struct {
 
 	ExperimentalBAL bool
 
+	// EIP-8304 consensus parameters. The index contract address and SSZ list
+	// bound are explicit while the final protocol values are unresolved; nil
+	// means the experimental finalizer is not wired.
+	Eip8304IndexContract *common.Address `toml:",omitempty"`
+	Eip8304ListLimit     uint64          `toml:",omitempty"`
+
 	// URL to connect to Heimdall node
 	HeimdallURL string
 	// No heimdall service

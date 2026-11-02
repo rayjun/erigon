@@ -82,6 +82,7 @@ import (
 	"github.com/erigontech/erigon/execution/execmodule"
 	"github.com/erigontech/erigon/execution/execmodule/chainreader"
 	execp2p "github.com/erigontech/erigon/execution/p2p"
+	"github.com/erigontech/erigon/execution/protocol/eip8304"
 	"github.com/erigontech/erigon/execution/protocol/rules"
 	"github.com/erigontech/erigon/execution/protocol/rules/ethash"
 	"github.com/erigontech/erigon/execution/stagedsync"
@@ -320,6 +321,40 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 		config.Prune, err = prune.EnsureNotChanged(tx, config.Prune)
 		if err != nil {
 			return err
+		}
+		storedGenesis, err := rawdb.ReadGenesis(tx)
+		if err != nil {
+			return fmt.Errorf("read stored genesis for EIP-8304 startup: %w", err)
+		}
+		eip8304Enabled, err := eip8304StartupEnabled(
+			eip8304StartupChainConfig(storedGenesis, config.Genesis),
+			config.Eip8304IndexContract,
+			config.Eip8304ListLimit,
+		)
+		if err != nil {
+			return err
+		}
+		if eip8304Enabled {
+			if err := eip8304.EnsureConfiguration(tx, *config.Eip8304IndexContract, config.Eip8304ListLimit); err != nil {
+				return err
+			}
+			executed, err := stages.GetStageProgress(tx, stages.Execution)
+			if err != nil {
+				return fmt.Errorf("read execution progress for EIP-8304 reconcile: %w", err)
+			}
+			report, err := eip8304.ReconcileHotTableStore(tx, executed, config.Eip8304ListLimit)
+			if err != nil {
+				return fmt.Errorf("reconcile EIP-8304 table store: %w", err)
+			}
+			logger.Info("Reconciled EIP-8304 table store",
+				"executed", executed,
+				"checked", report.Checked,
+				"kept", report.Kept,
+				"dropped_damaged", report.DroppedDamaged,
+				"dropped_ahead", report.DroppedAhead,
+				"dropped_stale", report.DroppedStale,
+				"highest_covered", report.HighestCovered,
+			)
 		}
 
 		return nil
@@ -806,6 +841,13 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 		txnProvider = backend.shutterPool
 	}
 
+	var eip8304Finalize []stagedsync.Eip8304FinalizeConfig
+	if config.Eip8304IndexContract != nil && config.Eip8304ListLimit > 0 {
+		eip8304Finalize = append(eip8304Finalize, stagedsync.Eip8304FinalizeConfig{
+			IndexContract: *config.Eip8304IndexContract,
+			ListLimit:     config.Eip8304ListLimit,
+		})
+	}
 	blkBuilder := builder.NewBuilder(
 		backend.sentryCtx,
 		backend.chainDB,
@@ -829,6 +871,7 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 			config.Sync,
 			config.ExperimentalBAL,
 			backend.readAheader,
+			eip8304Finalize...,
 		),
 		backend.notifications.Events,
 		&vm.Config{},

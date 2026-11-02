@@ -30,6 +30,7 @@ type AssemblerCfg struct {
 	Engine          rules.Engine
 	BlockReader     dbservices.FullBlockReader
 	ExperimentalBAL bool
+	Finalizer       protocol.BlockFinalizer
 }
 
 type AssembledBlock struct {
@@ -396,7 +397,7 @@ func (ba *BlockAssembler) AssembleBlock(stateReader state.StateReader, ibs *stat
 		ibs.ResetVersionedIO()
 	}
 	block, ba.Requests, err = protocol.FinalizeBlockExecution(ba.cfg.Engine, stateReader, ba.Header, ba.Txns, ba.Uncles,
-		ba.writer(), ba.cfg.ChainConfig, ibs, ba.Receipts, ba.Withdrawals, chainReader, true, logger, nil)
+		ba.writer(), ba.cfg.ChainConfig, ibs, ba.Receipts, ba.Withdrawals, chainReader, true, logger, nil, ba.cfg.Finalizer)
 
 	if err != nil {
 		return nil, fmt.Errorf("cannot finalize block execution: %s", err)

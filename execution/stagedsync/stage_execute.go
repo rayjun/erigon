@@ -82,6 +82,7 @@ type ExecuteBlockCfg struct {
 
 	experimentalBAL bool
 	readAheader     *exec.BlockReadAheader
+	eip8304Finalize *Eip8304FinalizeConfig
 }
 
 func StageExecuteBlocksCfg(
@@ -101,12 +102,16 @@ func StageExecuteBlocksCfg(
 	syncCfg ethconfig.Sync,
 	experimentalBAL bool,
 	readAheader *exec.BlockReadAheader,
+	eip8304Finalize ...Eip8304FinalizeConfig,
 ) ExecuteBlockCfg {
 	if dirs.SnapDomain == "" {
 		panic("empty `dirs` variable")
 	}
+	if len(eip8304Finalize) > 1 {
+		panic(fmt.Sprintf("eip8304: execute stage accepts at most one finalize config, got %d", len(eip8304Finalize)))
+	}
 
-	return ExecuteBlockCfg{
+	cfg := ExecuteBlockCfg{
 		db:              db,
 		prune:           pm,
 		batchSize:       batchSize,
@@ -124,6 +129,11 @@ func StageExecuteBlocksCfg(
 		experimentalBAL: experimentalBAL,
 		readAheader:     readAheader,
 	}
+	if len(eip8304Finalize) > 0 {
+		finalize := eip8304Finalize[0]
+		cfg.eip8304Finalize = &finalize
+	}
+	return cfg
 }
 
 // ChainConfig returns the chain configuration.
@@ -621,6 +631,16 @@ func PruneExecutionStage(ctx context.Context, s *PruneState, tx kv.TemporalRwTx,
 	if pruneTimeout := remainingPruneTimeout(); pruneTimeout > 0 {
 		if _, err := tx.PruneSmallBatches(ctx, pruneTimeout); err != nil {
 			return err
+		}
+	}
+	if cfg.chainConfig != nil && cfg.chainConfig.IsEip8304Scheduled() {
+		keepFrom := eip8304.PruneFloor(s.ForwardProgress)
+		pruned, err := eip8304.PruneHotTableRecords(tx, keepFrom)
+		if err != nil {
+			return fmt.Errorf("prune EIP-8304 tables below block %d: %w", keepFrom, err)
+		}
+		if pruned > 0 {
+			logger.Debug("Pruned EIP-8304 tables", "keepFrom", keepFrom, "pruned", pruned)
 		}
 	}
 	if duration := time.Since(stagePruneStartTime); duration > stagePruneTimeout {

@@ -64,6 +64,7 @@ import (
 	"github.com/erigontech/erigon/execution/protocol/rules/ethash/ethashcfg"
 	"github.com/erigontech/erigon/execution/state/genesiswrite"
 	"github.com/erigontech/erigon/execution/types"
+	"github.com/erigontech/erigon/execution/types/accounts"
 	"github.com/erigontech/erigon/node/direct"
 	"github.com/erigontech/erigon/node/ethconfig"
 	"github.com/erigontech/erigon/node/logging"
@@ -122,9 +123,21 @@ var (
 		Usage: "Slot duration in seconds for PoS dev mode (minimum: 2)",
 		Value: 6,
 	}
+	DevGenesisTimeFlag = cli.Uint64Flag{
+		Name:  "dev.genesis-time",
+		Usage: "Explicit Unix genesis time for PoS dev mode (0 uses the current time); set the same value on every node that shares the chain",
+	}
 	DevEip8304Flag = cli.BoolFlag{
 		Name:  "dev.eip8304",
 		Usage: "Activate the experimental EIP-8304 index fork from genesis in PoS dev mode and predeploy the mock index contract",
+	}
+	Eip8304IndexContractFlag = cli.StringFlag{
+		Name:  "eip8304.index-contract",
+		Usage: "Explicit EIP-8304 index contract address (required whenever EIP-8304 is scheduled)",
+	}
+	Eip8304ListLimitFlag = cli.Uint64Flag{
+		Name:  "eip8304.list-limit",
+		Usage: "Explicit SSZ List[Hash32, N] bound used for EIP-8304 table roots (required whenever EIP-8304 is scheduled)",
 	}
 	ChainFlag = cli.StringFlag{
 		Name:  "chain",
@@ -2207,11 +2220,24 @@ func setDevnetEthConfig(ctx *cli.Command, cfg *ethconfig.Config, logger log.Logg
 	// predeploy the mock index contract. Without this flag the development chain
 	// is unchanged.
 	if ctx.Bool(DevEip8304Flag.Name) {
-		if err := eip8304.EnableDevnet(cfg.Genesis, eip8304.DevnetIndexContractAddress); err != nil {
+		indexRaw := ctx.String(Eip8304IndexContractFlag.Name)
+		listLimit := ctx.Uint64(Eip8304ListLimitFlag.Name)
+		if indexRaw == "" || listLimit == 0 {
+			Fatalf("--%s requires explicit --%s and --%s", DevEip8304Flag.Name, Eip8304IndexContractFlag.Name, Eip8304ListLimitFlag.Name)
+		}
+		if !common.IsHexAddress(indexRaw) {
+			Fatalf("invalid --%s: %q", Eip8304IndexContractFlag.Name, indexRaw)
+		}
+		indexAddr := accounts.InternAddress(common.HexToAddress(indexRaw))
+		if err := eip8304.EnableDevnet(cfg.Genesis, indexAddr); err != nil {
 			Fatalf("Failed to enable the EIP-8304 devnet: %v", err)
 		}
+		indexCommon := indexAddr.Value()
+		cfg.Eip8304IndexContract = &indexCommon
+		cfg.Eip8304ListLimit = listLimit
 		logger.Info("EIP-8304 devnet enabled",
-			"index_contract", eip8304.DevnetIndexContractAddress.String(),
+			"index_contract", indexAddr.String(),
+			"list_limit", listLimit,
 			"eip8304_time", 0,
 		)
 	}
@@ -2224,7 +2250,7 @@ func setDevnetEthConfig(ctx *cli.Command, cfg *ethconfig.Config, logger log.Logg
 
 	// Configure embedded Caplin + dev validator.
 	cfg.InternalCL = true
-	cfg.CaplinConfig.DevValidatorSeed = seed
+	cfg.CaplinConfig.DevValidatorSeed = devnetValidatorSeed(ctx, seed)
 	cfg.CaplinConfig.DevValidatorCount = validatorCount
 	// Enable Beacon API for dev mode — the embedded dev validator
 	// calls /eth/v1/beacon/genesis, /eth/v1/validator/duties/*, etc.
@@ -2251,7 +2277,10 @@ func setDevnetEthConfig(ctx *cli.Command, cfg *ethconfig.Config, logger log.Logg
 	slotTime := max(uint64(ctx.Int(DevSlotTimeFlag.Name)), 2)
 	beaconCfg.SecondsPerSlot = slotTime
 	beaconCfg.InitializeForkSchedule()
-	genesisTime := uint64(time.Now().Unix())
+	genesisTime, err := devnetGenesisTime(ctx)
+	if err != nil {
+		Fatalf("Invalid dev genesis time: %v", err)
+	}
 	// Compute the EL genesis block hash so the beacon state's Eth1Data
 	// matches the actual chain genesis.
 	elGenesisBlock, _, err := genesiswrite.GenesisToBlock(nil, cfg.Genesis, cfg.Dirs, logger)
@@ -2300,6 +2329,31 @@ func setDevnetEthConfig(ctx *cli.Command, cfg *ethconfig.Config, logger log.Logg
 
 	cfg.CaplinConfig.CustomConfigPath = configPath
 	cfg.CaplinConfig.CustomGenesisStatePath = genesisStatePath
+}
+
+// devnetGenesisTime returns the explicit genesis timestamp for a reusable dev
+// chain, or the current time when the caller did not pin one. Zero is rejected
+// when explicitly set: it would move the chain to the Unix epoch instead of
+// making the "use the current time" default visible.
+func devnetGenesisTime(ctx *cli.Command) (uint64, error) {
+	if !ctx.IsSet(DevGenesisTimeFlag.Name) {
+		return uint64(time.Now().Unix()), nil
+	}
+	genesisTime := ctx.Uint64(DevGenesisTimeFlag.Name)
+	if genesisTime == 0 {
+		return 0, fmt.Errorf("--%s must be non-zero", DevGenesisTimeFlag.Name)
+	}
+	return genesisTime, nil
+}
+
+// devnetValidatorSeed keeps the genesis validator set deterministic even when
+// this node is a follower. --proposer.disable means the node validates and
+// syncs blocks but does not run the embedded validator client.
+func devnetValidatorSeed(ctx *cli.Command, seed string) string {
+	if ctx.IsSet(ProposingDisableFlag.Name) {
+		return ""
+	}
+	return seed
 }
 
 // Convenience type for optional flag value representing a rate limit that should print nicely for

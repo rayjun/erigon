@@ -63,6 +63,14 @@ type RejectedTx struct {
 
 type RejectedTxs []*RejectedTx
 
+// BlockFinalizer is an optional post-finalization hook for consensus rules
+// that need the block's final receipts and the same intra-block state. A nil
+// finalizer preserves the existing execution path; callers that do not persist
+// state (RPC, tracing, re-derivation) pass nil rather than fabricating one.
+type BlockFinalizer interface {
+	Finalize(block, blockTime uint64, blockHash, parentBlockHash common.Hash, receipts types.Receipts, syscall rules.SystemCall) error
+}
+
 type EphemeralExecResult struct {
 	StateRoot        common.Hash           `json:"stateRoot"`
 	TxRoot           common.Hash           `json:"txRoot"`
@@ -183,7 +191,7 @@ func ExecuteBlockEphemerally(
 	var err error
 	if !vmConfig.ReadOnly {
 		txs := block.Transactions()
-		newBlock, _, err = FinalizeBlockExecution(engine, stateReader, block.Header(), txs, block.Uncles(), stateWriter, chainConfig, ibs, receipts, block.Withdrawals(), chainReader, true, logger, vmConfig.Tracer)
+		newBlock, _, err = FinalizeBlockExecution(engine, stateReader, block.Header(), txs, block.Uncles(), stateWriter, chainConfig, ibs, receipts, block.Withdrawals(), chainReader, true, logger, vmConfig.Tracer, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -338,6 +346,7 @@ func FinalizeBlockExecution(
 	isMining bool,
 	logger log.Logger,
 	tracer *tracing.Hooks,
+	finalizer BlockFinalizer,
 ) (newBlock *types.Block, retRequests types.FlatRequests, err error) {
 	syscall := func(contract accounts.Address, data []byte) ([]byte, error) {
 		ret, err := SysCallContract(contract, data, cc, ibs, header, engine, false /* constCall */, vm.Config{})
@@ -351,6 +360,17 @@ func FinalizeBlockExecution(
 	}
 	if err != nil {
 		return nil, nil, err
+	}
+
+	if finalizer != nil {
+		if !isMining {
+			return nil, nil, fmt.Errorf("finalize block %d: BlockFinalizer requires building semantics", header.Number.Uint64())
+		}
+		// Building has no sealed block hash yet. Recording finalizers are not
+		// used on this path; see eip8304.Finalizer.Record.
+		if err := finalizer.Finalize(header.Number.Uint64(), header.Time, common.Hash{}, header.ParentHash, receipts, syscall); err != nil {
+			return nil, nil, fmt.Errorf("finalize block %d: %w", header.Number.Uint64(), err)
+		}
 	}
 
 	// A versioned ibs (parallel-mode block assembly) commits from the versionMap

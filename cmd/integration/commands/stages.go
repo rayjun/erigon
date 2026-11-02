@@ -325,10 +325,12 @@ func init() {
 	withTraceFlags(cmdStageExec)
 	withChainTipMode(cmdStageExec)
 	withErigondbDomainStepsInFrozenFile(cmdStageExec)
+	withEip8304(cmdStageExec)
 	rootCmd.AddCommand(cmdStageExec)
 
 	withStageBase(cmdStageExecReplay)
 	withBlock(cmdStageExecReplay)
+	withEip8304(cmdStageExecReplay)
 	rootCmd.AddCommand(cmdStageExecReplay)
 
 	withStageBase(cmdStageCustomTrace)
@@ -671,12 +673,16 @@ func stageExec(db kv.TemporalRwDB, ctx context.Context, logger log.Logger) error
 
 	genesis := readGenesis(chain)
 	br, _ := blocksIO(db, logger)
+	eip8304Finalize, err := eip8304FinalizeConfig()
+	if err != nil {
+		return err
+	}
 
 	notifications := shards.NewNotifications(nil)
 	cfg := stagedsync.StageExecuteBlocksCfg(db, pm, batchSize, chainConfig, engine, vmConfig, notifications,
 		/*stateStream=*/ false,
 		/*badBlockHalt=*/ true,
-		dirs, br, genesis, syncCfg, false /*experimentalBAL*/, exec.NewBlockReadAheader())
+		dirs, br, genesis, syncCfg, false /*experimentalBAL*/, exec.NewBlockReadAheader(), eip8304Finalize...)
 
 	if unwind > 0 {
 		if err := db.ViewTemporal(ctx, func(tx kv.TemporalTx) error {
@@ -1222,6 +1228,13 @@ func newSync(ctx context.Context, db kv.TemporalRwDB, builderConfig *buildercfg.
 	cfg.BatchSize = batchSize
 	cfg.TxPool.Disable = true
 	cfg.Genesis = genesis
+	eip8304Finalize, err := eip8304FinalizeConfig()
+	must(err)
+	if len(eip8304Finalize) > 0 {
+		indexContract := eip8304Finalize[0].IndexContract
+		cfg.Eip8304IndexContract = &indexContract
+		cfg.Eip8304ListLimit = eip8304Finalize[0].ListLimit
+	}
 	if builderConfig != nil {
 		cfg.Builder = *builderConfig
 	}

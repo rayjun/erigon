@@ -14,6 +14,7 @@ import (
 	"github.com/erigontech/erigon/execution/chain"
 	chainspec "github.com/erigontech/erigon/execution/chain/spec"
 	"github.com/erigontech/erigon/execution/protocol/eip8304"
+	"github.com/erigontech/erigon/execution/stagedsync/stages"
 )
 
 // TestInvalidateEip8304TablesIsGatedByForkConfig pins the two properties the
@@ -106,4 +107,45 @@ func storedTableExists(t *testing.T, tx kv.RwTx, key []byte) bool {
 	value, err := tx.GetOne(kv.Eip8304Tables, key)
 	require.NoError(t, err)
 	return value != nil
+}
+
+// TestPruneExecutionStagePrunesEip8304Tables pins the concrete execution-stage
+// wiring: a scheduled fork prunes tables below PruneFloor, and a network that
+// never schedules EIP-8304 leaves the bucket alone.
+func TestPruneExecutionStagePrunesEip8304Tables(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	logger := log.New()
+	zero := uint64(0)
+	const forward = uint64(320) // PruneFloor(320) == 1
+
+	t.Run("scheduled", func(t *testing.T) {
+		db := temporaltest.NewTestDB(t, datadir.New(t.TempDir()))
+		tx, err := db.BeginTemporalRw(ctx)
+		require.NoError(t, err)
+		defer tx.Rollback()
+
+		drop := seedStoredTable(t, tx, 0, 1)  // ends at block 0
+		keep := seedStoredTable(t, tx, 1, 1)  // ends at block 1
+		merge := seedStoredTable(t, tx, 0, 4) // ends at block 3
+		cfg := ExecuteBlockCfg{chainConfig: &chain.Config{Eip8304Time: &zero}}
+		require.NoError(t, PruneExecutionStage(ctx, &PruneState{ID: stages.Execution, ForwardProgress: forward}, tx, cfg, 0, logger))
+
+		require.False(t, storedTableExists(t, tx, drop), "a table below the rebuild floor must be pruned")
+		require.True(t, storedTableExists(t, tx, keep), "the table ending at the floor must survive")
+		require.True(t, storedTableExists(t, tx, merge), "a higher-level table ending above the floor must survive")
+	})
+
+	t.Run("not scheduled", func(t *testing.T) {
+		db := temporaltest.NewTestDB(t, datadir.New(t.TempDir()))
+		tx, err := db.BeginTemporalRw(ctx)
+		require.NoError(t, err)
+		defer tx.Rollback()
+
+		keep := seedStoredTable(t, tx, 0, 1)
+		cfg := ExecuteBlockCfg{chainConfig: &chain.Config{}}
+		require.NoError(t, PruneExecutionStage(ctx, &PruneState{ID: stages.Execution, ForwardProgress: forward}, tx, cfg, 0, logger))
+		require.True(t, storedTableExists(t, tx, keep), "an unscheduled fork must not touch the EIP-8304 bucket")
+	})
 }

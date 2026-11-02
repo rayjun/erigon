@@ -3,6 +3,7 @@ package eip8304
 import (
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/erigontech/erigon/common"
 )
@@ -115,6 +116,9 @@ func RootOfEntries(entries Entries, limit uint64) (common.Hash, error) {
 // not written by this node's own computation and is trusted to the record
 // checksum, not to verification.
 func VerifyTable(result TableResult, ref TableRef, chain CanonicalChain, limit uint64) error {
+	if err := validateTableRef(ref); err != nil {
+		return err
+	}
 	if result.Ref != ref {
 		return fmt.Errorf("%w: have %+v, want %+v", ErrTableRefMismatch, result.Ref, ref)
 	}
@@ -235,6 +239,13 @@ func validateTableRef(ref TableRef) error {
 	}
 	if ref.TableSize > 1 && ref.FirstBlock%ref.TableSize != 0 {
 		return fmt.Errorf("%w: first_block %d is not a multiple of table_size %d", ErrInvalidTableRef, ref.FirstBlock, ref.TableSize)
+	}
+	// Both the covered block window and the write block end at or after
+	// first_block + table_size - 1. Reject a reference whose arithmetic would
+	// wrap, so every later schedule check sees a real block number.
+	offset := ref.TableSize - 1 + ref.TableSize/4
+	if ref.FirstBlock > math.MaxUint64-offset {
+		return fmt.Errorf("%w: first_block %d with table_size %d overflows the block range", ErrInvalidTableRef, ref.FirstBlock, ref.TableSize)
 	}
 	return nil
 }

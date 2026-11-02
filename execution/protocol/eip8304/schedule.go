@@ -1,6 +1,9 @@
 package eip8304
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // The protocol-mandated table schedule. A table is identified by
 // (first_block, table_size); first_block is always a multiple of table_size
@@ -46,7 +49,11 @@ func WriteBlock(firstBlock, tableSize uint64) uint64 {
 	if !validTableSize(tableSize) {
 		invalidTableSize(tableSize)
 	}
-	return firstBlock + tableSize - 1 + tableSize/4
+	offset := tableSize - 1 + tableSize/4
+	if firstBlock > math.MaxUint64-offset {
+		panic(fmt.Sprintf("eip8304: write block for (%d, %d) overflows uint64", firstBlock, tableSize))
+	}
+	return firstBlock + offset
 }
 
 // DueTables returns every protocol table whose write moment is block `block`.

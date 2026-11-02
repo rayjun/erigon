@@ -39,11 +39,11 @@ func isHotStoreMetaKey(key []byte) bool {
 // Generation returns the store's current invalidation generation. It starts at
 // 0 and is bumped by every Invalidate.
 func (s *HotTableStore) Generation() (uint64, error) {
-	return readGeneration(s.tx)
+	return readGeneration(s.reads)
 }
 
 func (s *HotTableStore) readGeneration() (uint64, error) {
-	return readGeneration(s.tx)
+	return readGeneration(s.reads)
 }
 
 func readGeneration(db kv.Getter) (uint64, error) {
@@ -77,7 +77,14 @@ func writeGeneration(tx kv.RwTx, generation uint64) error {
 // `from` is the first block that no longer exists after the unwind: unwinding
 // to height H (H itself surviving) passes H+1.
 func (s *HotTableStore) Invalidate(from uint64) (int, error) {
-	return invalidateTables(s.tx, from)
+	if s.writes == nil {
+		return 0, ErrReadOnlyTableStore
+	}
+	dropped, err := invalidateTables(s.writes, from)
+	if err == nil {
+		clear(s.pending)
+	}
+	return dropped, err
 }
 
 // TableRecovery is the part of the store an unwind needs, and deliberately not
@@ -192,7 +199,10 @@ func (r ReconcileReport) Dropped() int {
 func (s *HotTableStore) Reconcile(executed uint64) (ReconcileReport, error) {
 	var report ReconcileReport
 
-	cursor, err := s.tx.RwCursor(kv.Eip8304Tables)
+	if s.writes == nil {
+		return report, ErrReadOnlyTableStore
+	}
+	cursor, err := s.writes.RwCursor(kv.Eip8304Tables)
 	if err != nil {
 		return report, fmt.Errorf("reconcile table store: %w", err)
 	}
@@ -273,7 +283,36 @@ func (s *HotTableStore) Reconcile(executed uint64) (ReconcileReport, error) {
 			report.HasRecords = true
 		}
 	}
+	clear(s.pending)
 	return report, nil
+}
+
+// ReconcileHotTableStore opens the node's persisted store and runs the restart
+// check against an already-read execution height. The caller owns tx so the pass
+// commits atomically with the startup checks around it.
+func ReconcileHotTableStore(tx kv.RwTx, executed, listLimit uint64) (ReconcileReport, error) {
+	canonical, err := NewDBHashes(tx)
+	if err != nil {
+		return ReconcileReport{}, err
+	}
+	store, err := NewHotTableStore(tx, hashesOnly{DBHashes: canonical}, ProgressFunc(func() (uint64, error) {
+		return executed, nil
+	}), listLimit)
+	if err != nil {
+		return ReconcileReport{}, err
+	}
+	return store.Reconcile(executed)
+}
+
+// hashesOnly narrows DBHashes to the store constructor. Reconcile only reads
+// canonical hashes; it never rebuilds entries, so an accidental entry request
+// is a programming error rather than a reason to read receipts on startup.
+type hashesOnly struct{ *DBHashes }
+
+var _ CanonicalData = hashesOnly{}
+
+func (hashesOnly) BlockEntries(uint64) (Entries, error) {
+	return nil, ErrMissingBlockData
 }
 
 // TableJob is a table computed away from the block it belongs to. It captures

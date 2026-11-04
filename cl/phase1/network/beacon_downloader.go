@@ -58,16 +58,46 @@ type ForwardBeaconDownloader struct {
 	beaconCfg             *clparams.BeaconChainConfig
 	httpFallbackURL       string      // beacon API base URL for HTTP fallback when P2P fails
 	httpPreferred         atomic.Bool // set after first HTTP fallback success; skips P2P probing
+	requestInterval       time.Duration
+	requestTimeout        time.Duration
+	sendBlocksByRange     func(ctx context.Context, start, count uint64) ([]*cltypes.SignedBeaconBlock, string, error)
 
-	mu sync.Mutex
+	requestSemOnce sync.Once
+	requestSem     chan struct{}
+	mu             sync.Mutex
 }
 
 func NewForwardBeaconDownloader(ctx context.Context, rpc *rpc.BeaconRpcP2P, beaconCfg *clparams.BeaconChainConfig) *ForwardBeaconDownloader {
 	return &ForwardBeaconDownloader{
-		ctx:       ctx,
-		rpc:       rpc,
-		beaconCfg: beaconCfg,
+		ctx:             ctx,
+		rpc:             rpc,
+		beaconCfg:       beaconCfg,
+		requestInterval: forwardBlockRequestInterval,
+		requestTimeout:  forwardBlockRequestTimeout,
 	}
+}
+
+func (f *ForwardBeaconDownloader) requestBlocksByRange(ctx context.Context, start, count uint64) ([]*cltypes.SignedBeaconBlock, string, error) {
+	if f.sendBlocksByRange != nil {
+		return f.sendBlocksByRange(ctx, start, count)
+	}
+	return f.rpc.SendBeaconBlocksByRangeReq(ctx, start, count)
+}
+
+func (f *ForwardBeaconDownloader) acquireRequest(ctx context.Context) bool {
+	f.requestSemOnce.Do(func() {
+		f.requestSem = make(chan struct{}, 1)
+	})
+	select {
+	case f.requestSem <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (f *ForwardBeaconDownloader) releaseRequest() {
+	<-f.requestSem
 }
 
 // SetProcessFunction sets the function used to process segments.
@@ -142,14 +172,35 @@ func forwardBlockRequestBackoff(consecutiveFailures int) time.Duration {
 	return min(forwardBlockRequestRetryBase*time.Duration(1<<uint(exponent)), forwardBlockRequestMaxBackoff)
 }
 
-func forwardBlockRequestInitialDelay(httpPreferred, httpSucceeded bool) time.Duration {
+func forwardBlockRequestInitialDelay(httpPreferred, httpSucceeded bool, interval time.Duration) time.Duration {
 	if httpPreferred && !httpSucceeded {
 		return 0
 	}
-	return forwardBlockRequestInterval
+	return interval
 }
 
 func (f *ForwardBeaconDownloader) RequestMore(ctx context.Context) {
+	// RequestMore blocks until its single blocks-by-range request completes or
+	// times out. The request gate serializes callers and remains cancellable for
+	// a waiter, so a future caller cannot overlap requests or delay shutdown.
+	// It must not be called from a ProcessFn, which runs while this call holds
+	// the gate.
+	if !f.acquireRequest(ctx) {
+		return
+	}
+	defer f.releaseRequest()
+	if ctx.Err() != nil {
+		return
+	}
+
+	requestInterval := f.requestInterval
+	if requestInterval <= 0 {
+		requestInterval = forwardBlockRequestInterval
+	}
+	requestTimeout := f.requestTimeout
+	if requestTimeout <= 0 {
+		requestTimeout = forwardBlockRequestTimeout
+	}
 	count := forwardBlockRequestCount
 	var resp peerAndBlocks
 	httpPreferred := f.httpPreferred.Load() && f.httpFallbackURL != ""
@@ -158,7 +209,7 @@ func (f *ForwardBeaconDownloader) RequestMore(ctx context.Context) {
 	// Fast path: when HTTP has been working, skip P2P probing entirely.
 	if httpPreferred {
 		select {
-		case <-time.After(forwardBlockRequestInterval):
+		case <-time.After(requestInterval):
 		case <-ctx.Done():
 			return
 		}
@@ -183,12 +234,12 @@ func (f *ForwardBeaconDownloader) RequestMore(ctx context.Context) {
 		var consecutiveFailures int
 		// If HTTP just failed, do not charge a second full interval before the
 		// first P2P attempt. Otherwise this call has already waited above.
-		requestTimer := time.NewTimer(forwardBlockRequestInitialDelay(httpPreferred, httpSucceeded))
+		requestTimer := time.NewTimer(forwardBlockRequestInitialDelay(httpPreferred, httpSucceeded, requestInterval))
 		defer requestTimer.Stop()
 		// Timeout: if no blocks received within this duration, return to let the caller
 		// run stale detection and potentially switch to ChainTipSync.
-		requestTimeout := time.NewTimer(forwardBlockRequestTimeout)
-		defer requestTimeout.Stop()
+		requestTimeoutTimer := time.NewTimer(requestTimeout)
+		defer requestTimeoutTimer.Stop()
 
 	Loop:
 		for {
@@ -223,7 +274,7 @@ func (f *ForwardBeaconDownloader) RequestMore(ctx context.Context) {
 				if time.Since(highestSlotUpdateTime) > 90*time.Second {
 					log.Trace("Forward beacon downloader gets stuck", "time", time.Since(highestSlotUpdateTime).Seconds(), "highestSlotProcessed", highestSlotProcessed)
 				}
-				responses, peerId, err := f.rpc.SendBeaconBlocksByRangeReq(ctx, reqSlot, reqCount)
+				responses, peerId, err := f.requestBlocksByRange(ctx, reqSlot, reqCount)
 				if err != nil {
 					if errors.Is(err, peers.ErrNoPeers) {
 						log.Debug("[Caplin] no peers available for beacon blocks by range request", "slot", reqSlot, "reqCount", reqCount)
@@ -277,7 +328,7 @@ func (f *ForwardBeaconDownloader) RequestMore(ctx context.Context) {
 				break Loop
 			case <-ctx.Done():
 				return
-			case <-requestTimeout.C:
+			case <-requestTimeoutTimer.C:
 				// No blocks received in time — return to let stale detection run.
 				return
 			}

@@ -43,6 +43,8 @@ type EonTracker interface {
 	EonByBlockNum(blockNum uint64) (Eon, bool)
 }
 
+var errNoActiveKeyperSet = errors.New("no active keyper set")
+
 type KsmEonTracker struct {
 	logger               log.Logger
 	blockListener        *BlockListener
@@ -174,8 +176,8 @@ func (et *KsmEonTracker) handleBlockEvent(blockEvent BlockEvent) error {
 
 	blockNum := blockEvent.LatestBlockNum
 	eon, ok, err := et.readEonAtNewBlockEvent(blockNum)
-	if errors.Is(err, bind.ErrNoCode) {
-		// A reset or unwind can precede deployment, invalidating all cached eons.
+	if errors.Is(err, bind.ErrNoCode) || errors.Is(err, errNoActiveKeyperSet) {
+		// Unwinds before deployment or the first activation invalidate cached eons.
 		et.currentEon = nil
 		et.recentEons.Clear(false)
 		et.lastCleanupBlockNum = 0
@@ -211,7 +213,7 @@ func (et *KsmEonTracker) readEonAtNewBlockEvent(blockNum uint64) (_ Eon, _ bool,
 	}()
 
 	callOpts := &bind.CallOpts{BlockNumber: uint256.NewInt(blockNum)}
-	if et.currentEon == nil {
+	if et.currentEon == nil || blockNum < et.currentEon.ActivationBlock {
 		var numKeyperSets uint64
 		numKeyperSets, err = et.ksmContract.GetNumKeyperSets(callOpts)
 		if err != nil {
@@ -221,7 +223,7 @@ func (et *KsmEonTracker) readEonAtNewBlockEvent(blockNum uint64) (_ Eon, _ bool,
 		// to avoid execution reverts for GetKeyperSetIndexByBlock
 		if numKeyperSets == 0 {
 			et.logger.Warn("no keyper sets found", "blockNum", blockNum)
-			return Eon{}, false, nil
+			return Eon{}, false, errNoActiveKeyperSet
 		}
 
 		var activationBlock uint64
@@ -231,7 +233,7 @@ func (et *KsmEonTracker) readEonAtNewBlockEvent(blockNum uint64) (_ Eon, _ bool,
 		}
 		if blockNum < activationBlock {
 			et.logger.Warn("initial keyper set not yet activated", "blockNum", blockNum, "activationAt", activationBlock)
-			return Eon{}, false, nil
+			return Eon{}, false, errNoActiveKeyperSet
 		}
 	}
 
